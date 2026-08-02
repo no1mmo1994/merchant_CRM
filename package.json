@@ -1,0 +1,29 @@
+{
+  "name": "grab-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PulseOrder — Dashboard to manage multiple Grab Merchant stores",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:dev": "node scripts/dev.mjs",
+    "dev:api": "node scripts/dev-api.mjs",
+    "dev:web": "node scripts/dev-web.mjs",
+    "dev:fix": "node scripts/kill-ports.mjs 8123 8124 8125 3000",
+    "dev:find-port": "node scripts/find-free-port.mjs 8123 8124 8125",
+    "build": "pnpm --filter web build",
+    "start": "concurrently -n api,web -c blue,green \"pnpm start:api\" \"pnpm start:web\"",
+    "start:api": "cd services/api && uv run uvicorn app.main:app --host 127.0.0.1 --port 8000",
+    "start:web": "pnpm --filter web start",
+    "lint": "pnpm --filter web lint",
+    "typecheck": "pnpm --filter web typecheck",
+    "test": "pnpm --filter web test"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@11.10.0"
+}

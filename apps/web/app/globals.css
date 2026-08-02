@@ -1,0 +1,168 @@
+@import "tailwindcss";
+
+/* ============================================
+   PulseOrder — Light + Dark theme tokens
+   Phase 01 placeholder. Phase 04 finalizes.
+   ============================================ */
+
+:root {
+  /* Brand — orange (same across themes) */
+  --brand-50: #fff4ed;
+  --brand-100: #ffe6d4;
+  --brand-200: #ffcaa8;
+  --brand-300: #ffa972;
+  --brand-400: #ff8a47;
+  --brand-500: #f26b3a;
+  --brand-600: #e25525;
+  --brand-700: #b8431b;
+  --brand-800: #8e3416;
+  --brand-900: #642510;
+
+  /* Semantic (same across themes) */
+  --success-500: #10b981;
+  --danger-500: #ef4444;
+  --warning-500: #f59e0b;
+  --info-500: #3b82f6;
+
+  /* Light surfaces */
+  --bg: 0 0% 98%;
+  --surface: 0 0% 100%;
+  --surface-2: 0 0% 96%;
+  --border: 0 0% 90%;
+  --border-strong: 0 0% 80%;
+  --text: 0 0% 9%;
+  --text-muted: 0 0% 40%;
+  --text-subtle: 0 0% 55%;
+
+  /* shadcn-style aliases */
+  --background: hsl(var(--bg));
+  --foreground: hsl(var(--text));
+  --card: hsl(var(--surface));
+  --card-foreground: hsl(var(--text));
+  --primary: hsl(from var(--brand-500) h s l);
+  --primary-foreground: #ffffff;
+  --muted: hsl(var(--surface-2));
+  --muted-foreground: hsl(var(--text-muted));
+  --accent: hsl(from var(--brand-500) h s l);
+  --accent-foreground: #ffffff;
+  --destructive: hsl(from var(--danger-500) h s l);
+  --destructive-foreground: #ffffff;
+  --input: hsl(var(--border-strong));
+  --ring: hsl(from var(--brand-500) h s l);
+  --radius: 0.75rem;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow: 0 2px 4px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.08), 0 4px 6px rgba(0, 0, 0, 0.04);
+
+  /* Sidebar surface: blend toward surface-2 so the panel feels
+     distinct from the page background without drawing a hard line. */
+  --sidebar: var(--surface);
+  --sidebar-foreground: var(--text);
+  --sidebar-border: hsl(var(--border));
+  --sidebar-accent: hsl(var(--surface-2));
+  --sidebar-accent-foreground: var(--text);
+  --sidebar-primary: hsl(from var(--brand-500) h s l);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-ring: hsl(from var(--brand-500) h s l);
+}
+
+.dark {
+  --bg: 240 6% 10%;
+  --surface: 240 6% 12%;
+  --surface-2: 240 5% 16%;
+  --border: 240 5% 22%;
+  --border-strong: 240 5% 32%;
+  --text: 0 0% 98%;
+  --text-muted: 0 0% 65%;
+  --text-subtle: 0 0% 50%;
+
+  --background: hsl(var(--bg));
+  --foreground: hsl(var(--text));
+  --card: hsl(var(--surface));
+  --card-foreground: hsl(var(--text));
+  --primary: hsl(from var(--brand-500) h s l);
+  --primary-foreground: #ffffff;
+  --muted: hsl(var(--surface-2));
+  --muted-foreground: hsl(var(--text-muted));
+  --accent: hsl(from var(--brand-500) h s l);
+  --accent-foreground: #ffffff;
+  --destructive: hsl(from var(--danger-500) h s l);
+  --destructive-foreground: #ffffff;
+  --input: hsl(var(--border-strong));
+  --ring: hsl(from var(--brand-500) h s l);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow: 0 2px 4px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.5), 0 4px 6px rgba(0, 0, 0, 0.3);
+
+  --sidebar: hsl(240 6% 12%);
+  --sidebar-foreground: hsl(var(--text));
+  --sidebar-border: hsl(var(--border));
+  --sidebar-accent: hsl(var(--surface-2));
+  --sidebar-accent-foreground: hsl(var(--text));
+  --sidebar-primary: hsl(from var(--brand-500) h s l);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-ring: hsl(from var(--brand-500) h s l);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-border: hsl(var(--border));
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+
+  /* Surfaces for layout primitives */
+  --color-surface: hsl(var(--surface));
+  --color-surface-2: hsl(var(--surface-2));
+  --color-border-strong: hsl(var(--border-strong));
+  --color-text: hsl(var(--text));
+  --color-text-muted: hsl(var(--text-muted));
+  --color-text-subtle: hsl(var(--text-subtle));
+  --color-brand-50: var(--brand-50);
+  --color-brand-100: var(--brand-100);
+  --color-brand-200: var(--brand-200);
+  --color-brand-300: var(--brand-300);
+  --color-brand-400: var(--brand-400);
+  --color-brand-500: var(--brand-500);
+  --color-brand-600: var(--brand-600);
+  --color-brand-700: var(--brand-700);
+  --color-brand-800: var(--brand-800);
+  --color-brand-900: var(--brand-900);
+  --color-success: var(--success-500);
+  --color-danger: var(--danger-500);
+  --color-warning: var(--warning-500);
+  --color-info: var(--info-500);
+
+  /* Sidebar tokens (shadcn primitives read these) */
+  --color-sidebar: var(--surface);
+  --color-sidebar-foreground: var(--text);
+  --color-sidebar-border: hsl(var(--border));
+  --color-sidebar-accent: hsl(var(--surface-2));
+  --color-sidebar-accent-foreground: var(--text);
+  --color-sidebar-primary: hsl(from var(--brand-500) h s l);
+  --color-sidebar-primary-foreground: #ffffff;
+  --color-sidebar-ring: hsl(from var(--brand-500) h s l);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+}

@@ -1,0 +1,74 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+*.egg-info/
+
+# Next.js
+.next/
+out/
+next-env.d.ts
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Database (SQLite)
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test artifacts
+coverage/
+.nyc_output/
+
+# Generated
+*.generated.ts
+*.generated.js
+
+# Local dev artifacts (don't ship these)
+.next/dev/lock
+api.out.log
+next-*.log
+

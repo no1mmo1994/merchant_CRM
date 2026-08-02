@@ -1,0 +1,337 @@
+"use client";
+
+import * as React from "react";
+import { useSortable } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { ChevronDown, ChevronRight, GripVertical, ImageIcon, ListChecks, Pencil, Plus, Trash2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { useCreateItem, useDeleteCategory, useUploadItemImage } from "@/lib/api/menu";
+import { toast } from "sonner";
+
+/** A modifier group attached to a menu item (e.g. "Topping"). */
+export interface ItemModifierGroup {
+  modifier_group_id: string;
+  modifier_group_name: string;
+  selection_range_min: number;
+  selection_range_max: number;
+  modifiers: Array<{
+    modifier_id: string;
+    modifier_name: string;
+    price_vnd: number;
+    price_display?: string | null;
+  }>;
+}
+
+export interface MenuItemData {
+  id: string;
+  name: string;
+  price?: number;
+  description?: string;
+  imageUrl?: string;
+  available?: boolean;
+  /** Modifier groups attached to this item (parsed from Grab's `modifierGroups`). */
+  modifierGroups?: ItemModifierGroup[];
+}
+
+export interface CategoryData {
+  id: string;
+  name: string;
+  itemCount?: number;
+  items?: MenuItemData[];
+}
+
+interface CategoryCardProps {
+  category: CategoryData;
+  onDelete?: (id: string) => void;
+}
+
+/** Format price as Vietnamese Dong */
+function formatVND(price: number): string {
+  return new Intl.NumberFormat("vi-VN", {
+    style: "currency",
+    currency: "VND",
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(price);
+}
+
+/**
+ * Sortable category card. Wraps the DnD kit's `useSortable` hook so the
+ * parent <SortableContext> in MenuTree can reorder us. The card also hosts
+ * a "quick add item" form so power-users can create menu items inline.
+ * When the category has items, they are rendered in an expandable section.
+ */
+export function CategoryCard({ category, onDelete }: CategoryCardProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: category.id });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.6 : 1,
+  };
+
+  const [expanded, setExpanded] = React.useState(true);
+  const [adding, setAdding] = React.useState(false);
+  const [name, setName] = React.useState("");
+  const [price, setPrice] = React.useState("");
+
+  const hasItems = Boolean(category.items && category.items.length > 0);
+
+  const createItem = useCreateItem();
+  const uploadImage = useUploadItemImage();
+  const deleteCategory = useDeleteCategory();
+
+  async function handleAddItem(e: React.FormEvent) {
+    e.preventDefault();
+    if (!name.trim()) {
+      toast.error("Tên món là bắt buộc");
+      return;
+    }
+    const priceVnd = Number(price.replace(/[^0-9]/g, ""));
+    if (!priceVnd || priceVnd <= 0) {
+      toast.error("Nhập giá hợp lệ bằng VND");
+      return;
+    }
+    try {
+      await createItem.mutateAsync({
+        name: name.trim(),
+        price_vnd: priceVnd,
+        category_id: category.id,
+      });
+      toast.success(`Đã tạo "${name.trim()}"`);
+      setName("");
+      setPrice("");
+      setAdding(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Tạo món thất bại");
+    }
+  }
+
+  async function handleDelete() {
+    if (!confirm(`Xóa danh mục "${category.name}"? Thao tác này không thể hoàn tác.`)) return;
+    try {
+      await deleteCategory.mutateAsync(category.id);
+      toast.success(`Đã xóa "${category.name}"`);
+      onDelete?.(category.id);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Xóa danh mục thất bại");
+    }
+  }
+
+  // expose upload hook so parents can wire an image-drop handler if needed
+  void uploadImage;
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className="group rounded-lg border border-(--color-border) bg-(--color-surface) shadow-sm"
+    >
+      {/* Category header */}
+      <div className="flex items-center gap-2 p-3">
+        <button
+          type="button"
+          {...attributes}
+          {...listeners}
+          aria-label="Drag to reorder"
+          className="cursor-grab touch-none rounded p-1 text-(--color-muted-foreground) hover:bg-(--color-surface-2) active:cursor-grabbing"
+        >
+          <GripVertical className="h-4 w-4" />
+        </button>
+
+        {/* Expand/collapse button — only when items exist */}
+        {hasItems && (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="flex h-6 w-6 items-center justify-center rounded text-(--color-muted-foreground) hover:bg-(--color-surface-2)"
+            aria-label={expanded ? "Thu gọn" : "Mở rộng"}
+          >
+            {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+          </button>
+        )}
+
+        <div className="flex-1 truncate">
+          <div className="truncate text-sm font-medium text-(--color-foreground)">
+            {category.name}
+          </div>
+          {typeof category.itemCount === "number" && (
+            <div className="text-xs text-(--color-muted-foreground)">
+              {category.itemCount} món
+            </div>
+          )}
+        </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={() => setAdding((v) => !v)}
+          aria-label="Add item"
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 text-red-500 hover:bg-red-500/10 hover:text-red-500"
+          onClick={handleDelete}
+          aria-label="Delete category"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+
+      {/* Quick add form */}
+      {adding && (
+        <form onSubmit={handleAddItem} className="mx-3 mb-3 space-y-2 border-t border-(--color-border) pt-3">
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Tên món (tiếng Việt)"
+            className="h-8 text-sm"
+            autoFocus
+          />
+          <Input
+            value={price}
+            onChange={(e) => setPrice(e.target.value)}
+            placeholder="Giá (VND)"
+            inputMode="numeric"
+            className="h-8 text-sm"
+          />
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" size="sm" onClick={() => setAdding(false)}>
+              Hủy
+            </Button>
+            <Button
+              type="submit"
+              size="sm"
+              disabled={createItem.isPending}
+              className="bg-(--color-brand) hover:bg-(--color-brand-hover) text-white"
+            >
+              {createItem.isPending ? "Đang thêm…" : "Thêm"}
+            </Button>
+          </div>
+        </form>
+      )}
+
+      {/* Items list */}
+      {expanded && hasItems && (
+        <div className="border-t border-(--color-border)">
+          {category.items!.map((item) => (
+            <div
+              key={item.id}
+              className="border-b border-(--color-border) px-3 py-2 last:border-b-0 hover:bg-(--color-surface-2)"
+            >
+              <div className="flex items-center gap-3">
+                {/* Item image */}
+                <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded-md bg-(--color-surface-2)">
+                  {item.imageUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={item.imageUrl}
+                      alt={item.name}
+                      className="h-full w-full object-cover"
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).style.display = "none";
+                        (e.target as HTMLImageElement).nextElementSibling?.classList.remove("hidden");
+                      }}
+                    />
+                  ) : null}
+                  <div className={`flex h-full w-full items-center justify-center ${item.imageUrl ? "hidden" : ""}`}>
+                    <ImageIcon className="h-5 w-5 text-(--color-muted-foreground)" />
+                  </div>
+                </div>
+
+                {/* Item info */}
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium text-(--color-foreground)">
+                    {item.name}
+                  </div>
+                  {item.description && (
+                    <div className="truncate text-xs text-(--color-muted-foreground)">
+                      {item.description}
+                    </div>
+                  )}
+                </div>
+
+                {/* Price */}
+                <div className="flex-shrink-0 text-right">
+                  {item.price !== undefined ? (
+                    <span className="text-sm font-semibold text-(--color-brand)">
+                      {formatVND(item.price)}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-(--color-muted-foreground)">Chưa đặt giá</span>
+                  )}
+                </div>
+
+                {/* Edit button */}
+                <Button variant="ghost" size="icon" className="h-7 w-7 flex-shrink-0">
+                  <Pencil className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+
+              {/* Modifier groups attached to this item */}
+              {item.modifierGroups && item.modifierGroups.length > 0 && (
+                <div className="mt-2 ml-15 space-y-1.5">
+                  {item.modifierGroups.map((mg) => {
+                    const range =
+                      mg.selection_range_min === mg.selection_range_max
+                        ? `Chọn ${mg.selection_range_max}`
+                        : `Chọn ${mg.selection_range_min}–${mg.selection_range_max}`;
+                    return (
+                      <div
+                        key={mg.modifier_group_id || mg.modifier_group_name}
+                        className="flex items-start gap-2 rounded-md bg-(--color-surface-2)/50 px-2 py-1.5 text-xs"
+                      >
+                        <ListChecks className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-(--color-brand)" />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-medium text-(--color-foreground)">
+                              {mg.modifier_group_name}
+                            </span>
+                            <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                              {range}
+                            </Badge>
+                            <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+                              {mg.modifiers.length} món
+                            </Badge>
+                          </div>
+                          {mg.modifiers.length > 0 && (
+                            <div className="mt-1 flex flex-wrap gap-1">
+                              {mg.modifiers.slice(0, 5).map((m) => (
+                                <span
+                                  key={m.modifier_id || m.modifier_name}
+                                  className="inline-flex items-center gap-1 rounded bg-(--color-surface) px-1.5 py-0.5 text-[10px] text-(--color-muted-foreground)"
+                                >
+                                  {m.modifier_name}
+                                  {m.price_vnd > 0 ? (
+                                    <span className="text-(--color-brand)">
+                                      +{m.price_vnd.toLocaleString("vi-VN")}đ
+                                    </span>
+                                  ) : null}
+                                </span>
+                              ))}
+                              {mg.modifiers.length > 5 && (
+                                <span className="text-[10px] text-(--color-muted-foreground)">
+                                  +{mg.modifiers.length - 5} khác
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

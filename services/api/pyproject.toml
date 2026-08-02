@@ -1,0 +1,62 @@
+[project]
+name = "grab-api"
+version = "0.1.0"
+description = "PulseOrder backend API — FastAPI service that proxies the Grab Merchant API"
+authors = [
+    { name = "PulseOrder" }
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "apscheduler>=3.11.3",
+    "bcrypt>=4.3.0",
+    "cryptography>=49.0.0",
+    "email-validator>=2.2.0",
+    "fastapi>=0.140.13",
+    "httpx>=0.28.1",
+    "itsdangerous>=2.2.0",
+    "pydantic-settings>=2.14.2",
+    "python-multipart>=0.0.32",
+    "slowapi>=0.1.10",
+    "sqlmodel>=0.0.39",
+    "uvicorn[standard]>=0.51.0",
+]
+
+[project.scripts]
+grab-api = "app.main:main"
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "app"
+module-root = ""
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "A", "C4", "PT", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "mypy>=2.3.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "respx>=0.22.0",
+    "ruff>=0.16.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  api:
+    build: ./services/api
+    env_file: .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./services/api/data:/app/data
+    restart: unless-stopped
+
+  web:
+    build: ./apps/web
+    env_file: .env
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "127.0.0.1:443:443"
+    volumes:
+      - ./services/api/deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./services/api/deploy/certs:/etc/nginx/certs:ro
+    depends_on:
+      - api
+      - web
+    restart: unless-stopped

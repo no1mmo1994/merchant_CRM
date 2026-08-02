@@ -1,0 +1,62 @@
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ── Virtual environments ────────────────────────────────────────────────────────
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# ── Test / coverage ─────────────────────────────────────────────────────────────
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.pytest_cache/
+.tox/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+
+# ── Data / databases ────────────────────────────────────────────────────────────
+data/
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# ── Certificates / secrets ───────────────────────────────────────────────────────
+deploy/certs/
+deploy/*.pem
+deploy/*.key
+*.pem
+*.crt
+*.key
+
+# ── IDE / OS ─────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

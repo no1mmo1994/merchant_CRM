@@ -65,16 +65,13 @@ function parseCategories(menu?: MenuPayload): CategoryData[] {
       // Grab uses imageURL (singular)
       const imageUrl = String(item.imageURL ?? item.imageUrl ?? item.photo ?? "");
       const description = String(item.description ?? item.desc ?? "");
-      const availableStatus = item.availableStatus;
-      // eligibleSellingStatus controls whether the item is *listed* on the
-      // storefront — independent from sold-out (availableStatus). Items with
-      // status "INELIGIBLE" are hidden from customers but still editable
-      // server-side. We surface this as `hidden` on the row so the Switch
-      // and ItemAvailabilityDialog can react to it.
-      const eligibleSellingStatus = String(
-        item.eligibleSellingStatus ?? "ELIGIBLE",
-      );
-      const hidden = eligibleSellingStatus === "INELIGIBLE";
+      // Grab v1 enum: 1=AVAILABLE, 2=OUT_OF_STOCK_TODAY, 3=OUT_OF_STOCK,
+      // 7=HIDDEN (verified against Menu/monan/hide_monan.py).
+      const availableStatus = Number(item.availableStatus ?? 1);
+      // Status 7 means the item is hidden from the customer menu entirely.
+      // Items 2/3 stay visible but unorderable. We surface `hidden` so the
+      // Switch + dialog can react distinctly to "hidden" vs "sold-out".
+      const hidden = availableStatus === 7;
 
       // Parse modifier groups embedded inside each item.
       // Grab shape: { modifierGroups: [{ modifierGroupID, modifierGroupName,
@@ -127,8 +124,12 @@ function parseCategories(menu?: MenuPayload): CategoryData[] {
         price: typeof price === "number" ? price : undefined,
         description: description || undefined,
         imageUrl: imageUrl || undefined,
-        available: availableStatus === 1 || availableStatus === true,
+        // available means "sellable" (status 1). Items 2/3 are sold-out but
+        // still listed, so they show as OFF. Status 7 is hidden — Switch is
+        // OFF too because it can't be ordered.
+        available: availableStatus === 1,
         hidden,
+        availableStatus,
         modifierGroups:
           modifierGroups.length > 0 ? modifierGroups : undefined,
       };

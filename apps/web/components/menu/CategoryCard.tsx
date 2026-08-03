@@ -39,13 +39,20 @@ export interface MenuItemData {
   price?: number;
   description?: string;
   imageUrl?: string;
+  /**
+   * Item is sellable on the storefront (status=1). Sold-out (2|3) or
+   * hidden (7) items return false here.
+   */
   available?: boolean;
   /**
-   * Ẩn hoàn toàn khỏi menu khách (eligibleSellingStatus=INELIGIBLE).
-   * Khác với `available=false` — item vẫn hiển thị ở storefront, chỉ
-   * không order được. `hidden=true` thì item biến mất cho tới khi bật lại.
+   * Item is hidden from the customer menu entirely (status=7). Distinct
+   * from `available=false` — sold-out items still show in the menu, just
+   * can't be ordered. Hidden items disappear until the merchant toggles
+   * them back on.
    */
   hidden?: boolean;
+  /** Numeric availableStatus from Grab (1|2|3|7) — drives badge styling. */
+  availableStatus?: number;
   /** Modifier groups attached to this item (parsed from Grab's `modifierGroups`). */
   modifierGroups?: ItemModifierGroup[];
 }
@@ -290,13 +297,14 @@ function ItemRow({ item, categoryId }: ItemRowProps) {
       setStopDialogOpen(true);
       return;
     }
-    // ON (next=true) → restore both sold-out + visibility. The backend
-    // grabs the current sellingTimeID from the menu snapshot so we don't
-    // need to fetch it here.
+    // ON (next=true) → single v1 call sets status=1. The backend folds
+    // `hidden` into status, but since we're explicitly setting status=1
+    // (which means AVAILABLE + visible) we don't need the alias. Selling
+    // time is auto-fetched from the menu snapshot.
     try {
       await updateAvailability.mutateAsync({
         itemId: item.id,
-        input: { status: 1, hidden: false },
+        input: { status: 1 },
       });
       toast.success(`Đã bật "${item.name}"`);
     } catch (err) {
@@ -333,12 +341,46 @@ function ItemRow({ item, categoryId }: ItemRowProps) {
 
         {/* Item info — name + price (price still on the right column for alignment) */}
         <div className="min-w-0 flex-1">
-          <div
-            className={`truncate text-sm font-medium ${
-              available ? "text-(--color-foreground)" : "text-(--color-muted-foreground)"
-            }`}
-          >
-            {item.name}
+          <div className="flex items-center gap-2">
+            <span
+              className={`truncate text-sm font-medium ${
+                available ? "text-(--color-foreground)" : "text-(--color-muted-foreground)"
+              }`}
+            >
+              {item.name}
+            </span>
+            {/* Status pills — match Grab merchant's mobile UX. Distinct
+                color per status so the merchant can read the row at a
+                glance:
+                  2 = yellow  → "hết bán hôm nay" (auto-reset at midnight)
+                  3 = orange → "không về hàng" (sold out until toggled back)
+                  7 = amber   → "ẩn giấu" (hidden from customer menu)
+                All three are independent reasons; item.available is
+                derived from availableStatus === 1. */}
+            {item.availableStatus === 2 && (
+              <Badge
+                variant="outline"
+                className="border-yellow-500/50 bg-yellow-50 px-1.5 py-0 text-[10px] font-medium text-yellow-700"
+              >
+                hết bán hôm nay
+              </Badge>
+            )}
+            {item.availableStatus === 3 && (
+              <Badge
+                variant="outline"
+                className="border-orange-500/50 bg-orange-50 px-1.5 py-0 text-[10px] font-medium text-orange-700"
+              >
+                không về hàng
+              </Badge>
+            )}
+            {item.hidden && (
+              <Badge
+                variant="outline"
+                className="border-amber-500/50 bg-amber-50 px-1.5 py-0 text-[10px] font-medium text-amber-700"
+              >
+                ẩn giấu
+              </Badge>
+            )}
           </div>
         </div>
 

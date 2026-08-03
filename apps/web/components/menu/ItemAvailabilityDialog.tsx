@@ -26,19 +26,18 @@ interface ItemAvailabilityDialogProps {
 
 /**
  * Each row in the "Đổi trạng thái" dialog is a separate action, NOT a
- * radio choice. Tapping a row + Xác nhận commits the matching backend
- * call. This matches Grab's merchant mobile UX where each option is its
- * own command.
+ * radio choice. Tapping a row commits the matching backend call.
  *
- * Semantics per the user spec:
+ * Semantics (verified against Grab's v1 endpoint enum, mirror of
+ * Menu/monan/bat_tatmon.py and hide_monan.py):
  *   - "Hết bán hôm nay"     → status=2  (item still listed, cannot be
  *                                     ordered until midnight, auto-reset)
  *   - "Không về hàng nữa"   → status=3  (item still listed, cannot be
  *                                     ordered until merchant toggles back)
- *   - "Ẩn mục này"          → hidden=true (item hidden from storefront
- *                                     entirely via eligibleSellingStatus
- *                                     upsert; merchant can still edit)
- *   - "Bật lại / Hiển thị"  → status=1 + hidden=false (restore both)
+ *   - "Ẩn mục này"          → status=7  (item hidden from storefront
+ *                                     entirely; merchant dashboard still
+ *                                     shows it with "ẩn giấu" badge)
+ *   - "Bật lại / Hiển thị"  → status=1  (restore sellable + visible)
  */
 type ActionKind = "status_2" | "status_3" | "hide" | "restore";
 
@@ -109,7 +108,7 @@ export function ItemAvailabilityDialog({
       if (kind === "restore") {
         await updateAvailability.mutateAsync({
           itemId: item.id,
-          input: { status: 1, hidden: false },
+          input: { status: 1 },
         });
         toast.success(`Đã bật lại "${item.name}"`);
         onApplied?.(1);
@@ -130,7 +129,7 @@ export function ItemAvailabilityDialog({
       } else if (kind === "hide") {
         await updateAvailability.mutateAsync({
           itemId: item.id,
-          input: { hidden: true },
+          input: { status: 7 },
         });
         toast.success(`Đã ẩn "${item.name}" khỏi menu khách`);
       }

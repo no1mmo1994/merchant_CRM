@@ -22,7 +22,7 @@ from app.schemas import (
     UpdateItemResponse,
     UploadImageResponse,
 )
-from grab.endpoints.items import create_or_update_item, set_item_availability, set_item_availability_status, set_item_visibility, upload_image
+from grab.endpoints.items import create_or_update_item, set_item_availability, set_item_availability_status, upload_image
 
 log = logging.getLogger("pulseorder.items")
 
@@ -381,33 +381,41 @@ async def update_item_availability(
 
     Accepts (in any combination):
 
-    * ``status`` (1|2|3) + optional ``selling_time_id`` — sold-out reasons
-      (Grab's v1 endpoint). 1=AVAILABLE, 2=OUT_OF_STOCK_TODAY,
-      3=OUT_OF_STOCK (item still listed, but cannot be ordered).
-    * ``available: bool`` (back-compat) — translated to status=1 (true) or
-      status=3 (false).
-    * ``hidden: bool`` — flips ``eligibleSellingStatus`` so the item is
-      hidden from the storefront entirely. Item stays editable server-side.
-
-    When ``hidden`` is supplied, the sold-out endpoint is skipped; we
-    forward the request to upsert-item instead.
+    * ``status`` (1|2|3|7) + optional ``selling_time_id`` — Grab's v1
+      endpoint enum:
+        1 = AVAILABLE (sellable, listed)
+        2 = OUT_OF_STOCK_TODAY (listed, can't order until midnight)
+        3 = OUT_OF_STOCK (listed, can't order until merchant toggles back)
+        7 = HIDDEN (not in customer menu at all; merchant still sees it).
+      Verified against ``Menu/monan/bat_tatmon.py`` and
+      ``Menu/monan/hide_monan.py``.
+    * ``available: bool`` (back-compat) — translated to status=1 (true)
+      or status=3 (false).
+    * ``hidden: bool`` — convenience alias for status=7 (true) /
+      status=1 (false). Folded into ``status`` before dispatch.
     """
     from app.deps import write_audit_log
 
     # Resolve the numeric status + (if needed) the current sellingTimeID.
     status: int | None = body.status
     selling_time_id: str | None = body.selling_time_id
-    if status is None and body.available is not None and body.hidden is None:
-        # Back-compat: simple on/off Switch without a reason and without
-        # an explicit hidden flag. Map true → status=1, false → status=3.
-        # (If `hidden` is also given we treat it as a separate togg le.)
+
+    # Fold ``hidden`` into ``status`` so a single v1 call handles both.
+    # hidden=true  → status=7 (ẩn hoàn toàn khỏi menu khách)
+    # hidden=false → status=1 (khôi phục bán + hiển thị)
+    # If both are supplied, ``hidden`` wins because it conveys intent.
+    if body.hidden is not None:
+        status = 7 if body.hidden else 1
+
+    if status is None and body.available is not None:
+        # Back-compat: simple on/off Switch without a reason.
         status = 1 if body.available else 3
-    if status is None and body.hidden is None and body.available is None:
+    if status is None:
         raise HTTPException(
             status_code=422,
             detail={
                 "code": "missing_field",
-                "message": "Cần truyền `status` (1|2|3), `available` (bool) hoặc `hidden` (bool).",
+                "message": "Cần truyền `status` (1|2|3|7), `available` (bool) hoặc `hidden` (bool).",
             },
         )
 
@@ -419,56 +427,36 @@ async def update_item_availability(
     }
 
     try:
-        # 1. Visibility toggle (if requested). Independent from sold-out.
-        if body.hidden is not None:
+        if status == 1 and not selling_time_id:
+            # v1 endpoint requires sellingTimeID for status=1; pull from
+            # current menu snapshot.
             try:
-                await set_item_visibility(
-                    client, item_id=item_id, hidden=body.hidden,
-                )
-            except ValueError as exc:
-                msg = str(exc)
-                if "not found" in msg.lower():
-                    raise HTTPException(
-                        status_code=404,
-                        detail={"code": "item_not_found", "message": msg},
-                    ) from exc
-                raise HTTPException(
-                    status_code=502,
-                    detail={"code": "menu_unavailable", "message": msg},
-                ) from exc
+                current = await _load_item(item_id, client)
+            except HTTPException:
+                raise
+            selling_time_id = (
+                str(current.get("sellingTimeID") or "")
+                or "AlwaysAvailable"
+            )
 
-        # 2. Sold-out status toggle (if requested).
-        if status is not None:
-            if status == 1 and not selling_time_id:
-                # v1 endpoint requires sellingTimeID for status=1; pull from
-                # current menu snapshot.
-                try:
-                    current = await _load_item(item_id, client)
-                except HTTPException:
-                    raise
-                selling_time_id = (
-                    str(current.get("sellingTimeID") or "")
-                    or "AlwaysAvailable"
-                )
-
-            try:
-                await set_item_availability_status(
-                    client,
-                    item_id=item_id,
-                    available_status=status,
-                    selling_time_id=selling_time_id,
-                )
-            except ValueError as exc:
-                msg = str(exc)
-                if "not found" in msg.lower():
-                    raise HTTPException(
-                        status_code=404,
-                        detail={"code": "item_not_found", "message": msg},
-                    ) from exc
+        try:
+            await set_item_availability_status(
+                client,
+                item_id=item_id,
+                available_status=status,
+                selling_time_id=selling_time_id,
+            )
+        except ValueError as exc:
+            msg = str(exc)
+            if "not found" in msg.lower():
                 raise HTTPException(
-                    status_code=422,
-                    detail={"code": "invalid_payload", "message": msg},
+                    status_code=404,
+                    detail={"code": "item_not_found", "message": msg},
                 ) from exc
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_payload", "message": msg},
+            ) from exc
     except httpx.HTTPStatusError as exc:
         log.warning("Grab availability toggle rejected for %s: %s", item_id, exc)
         raise HTTPException(
@@ -501,7 +489,7 @@ async def update_item_availability(
 
     return UpdateAvailabilityResponse(
         item_id=item_id,
-        available=(status == 1) if status is not None else None,
+        available=(status == 1),
         status=status,
-        hidden=body.hidden,
+        hidden=body.hidden if body.hidden is not None else (status == 7),
     )

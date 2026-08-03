@@ -248,10 +248,14 @@ async def set_item_availability_status(
     preserves name/price/description automatically.
 
     `available_status` per Grab:
-        1 = AVAILABLE (item is sellable again)
-        2 = OUT_OF_STOCK_TODAY (sold-out until midnight, then auto-reset)
-        3 = OUT_OF_STOCK (sold-out, hidden from customers until merchant
-            toggles it back to 1)
+        1 = AVAILABLE (item is sellable again, listed on storefront)
+        2 = OUT_OF_STOCK_TODAY (sold-out until midnight, then auto-reset;
+            item stays listed in the menu, just can't be ordered)
+        3 = OUT_OF_STOCK (sold-out, item stays listed in the menu, just
+            can't be ordered until merchant toggles it back to 1)
+        7 = HIDDEN (item disappears from customer menu entirely; merchant
+            dashboard still shows it with a "ẩn giấu" badge so it stays
+            editable. Verified against ``Menu/monan/hide_monan.py``.)
 
     `selling_time_id` is required when ``available_status == 1`` to tell
     Grab when the item is sellable again. Pass the store's existing
@@ -260,9 +264,12 @@ async def set_item_availability_status(
     """
     if not item_id:
         raise ValueError("item_id is required to set availability status")
-    if available_status not in (1, 2, 3):
+    # Grab's v1 endpoint accepts 1 (AVAILABLE), 2 (OUT_OF_STOCK_TODAY),
+    # 3 (OUT_OF_STOCK), and 7 (HIDDEN — verified against
+    # Menu/monan/hide_monan.py).
+    if available_status not in (1, 2, 3, 7):
         raise ValueError(
-            f"available_status must be 1, 2 or 3 (got {available_status})"
+            f"available_status must be 1, 2, 3 or 7 (got {available_status})"
         )
 
     payload: dict = {
@@ -294,83 +301,29 @@ async def set_item_visibility(
 ) -> dict:
     """Toggle whether an item is visible to customers on the storefront.
 
-    Grab's v1 ``available-status`` endpoint only flips the sellable flag
-    (sold-out today / sold-out forever). It does NOT control whether the
-    item is *listed* on the menu. That is governed by the nested
-    ``eligibleSellingStatus`` field on the item payload, which only the
-    upsert-item endpoint can mutate.
+    Verified against ``Menu/monan/hide_monan.py`` — Grab's v1 endpoint
+    ``PUT /food/merchant/v1/items/available-status`` accepts
+    ``availableStatus: 7`` to mean "ẩn món hoàn toàn". The item disappears
+    from the customer-facing menu entirely but the merchant dashboard still
+    shows it (with a "ẩn giấu" badge) so it stays editable.
 
-    Semantics:
-        hidden=True  → ``eligibleSellingStatus="INELIGIBLE"`` (item is not
-                       shown to customers; merchant can still edit it).
-        hidden=False → ``eligibleSellingStatus="ELIGIBLE"`` (item appears
-                       on the storefront again).
+    Note: ``availableStatus=7`` is *separate* from sold-out:
+        1 = AVAILABLE (sellable, listed)
+        2 = OUT_OF_STOCK_TODAY (sellable in menu list, can't order today)
+        3 = OUT_OF_STOCK (sellable in menu list, can't order)
+        7 = HIDDEN (not in customer menu list; merchant still sees it)
+
+    Setting ``hidden=False`` sends ``availableStatus=1`` to restore both
+    visibility and sellability.
 
     On a 5xx from Grab, raises the underlying httpx error.
     """
     if not item_id:
         raise ValueError("item_id is required to toggle visibility")
 
-    from grab.endpoints.menu import get_full_menu
-
-    menu = await get_full_menu(client)
-    if not isinstance(menu, dict):
-        raise ValueError("menu payload from Grab was not a dict")
-
-    target: dict | None = None
-    for cat in menu.get("categories") or []:
-        for item in (cat or {}).get("items") or []:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("itemID") or item.get("skuID") or "") == item_id:
-                target = item
-                break
-        if target is not None:
-            break
-
-    if target is None:
-        raise ValueError(f"item {item_id} not found in current menu")
-
-    name_vi = str(target.get("itemName") or target.get("name") or "")
-    name_en = (
-        ((target.get("nameTranslation") or {}).get("translation") or {}).get("en")
-        or name_vi
-    )
-    description_vi = str(target.get("description") or "")
-    description_en = (
-        ((target.get("descriptionTranslation") or {}).get("translation") or {})
-        .get("en")
-        or description_vi
-    )
-    price_vnd = int(target.get("priceInMin") or target.get("price") or 0)
-    image_urls = list(target.get("imageURLs") or [])
-    webp_urls = list(target.get("webPURLs") or image_urls)
-    webp_url = str(target.get("webPURL") or (webp_urls[0] if webp_urls else ""))
-    linked_modifier_group_ids = list(target.get("linkedModifierGroupIDs") or [])
-    selling_time_id = str(target.get("sellingTimeID") or "AlwaysAvailable")
-    category_id = str(target.get("categoryID") or "")
-    sold_quantity = int(target.get("soldQuantity") or 0)
-    sort_order = target.get("sortOrder")
-    available_at = str(target.get("availableAt") or "0001-01-01T00:00:00.000Z")
-    available_status = int(target.get("availableStatus") or 1)
-
-    return await create_or_update_item(
+    # 7 = HIDDEN, 1 = AVAILABLE (re-show + re-sell in one call).
+    return await set_item_availability_status(
         client,
-        name_vi=name_vi,
-        name_en=name_en,
-        description_vi=description_vi,
-        description_en=description_en,
-        price_vnd=price_vnd,
-        category_id=category_id,
-        image_urls=image_urls,
-        webp_urls=webp_urls,
-        webp_url=webp_url,
-        linked_modifier_group_ids=linked_modifier_group_ids,
-        selling_time_id=selling_time_id,
         item_id=item_id,
-        sold_quantity=sold_quantity,
-        sort_order=int(sort_order) if isinstance(sort_order, (int, float)) else None,
-        available_at=available_at,
-        available_status=available_status,
-        eligible_selling_status="INELIGIBLE" if hidden else "ELIGIBLE",
+        available_status=7 if hidden else 1,
     )

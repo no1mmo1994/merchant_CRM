@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+
+# Grab's v1 available-status enum. 1/2/3 are sold-out reasons; 7 = HIDDEN
+# (verified against Menu/monan/hide_monan.py). Using `Literal` so the
+# generated OpenAPI enum is exact — clients get a clear 422 on bad values.
+AvailabilityStatus = Literal[1, 2, 3, 7]
 
 
 class CreateItemRequest(BaseModel):
@@ -50,18 +58,20 @@ class UpdateAvailabilityRequest(BaseModel):
 
     Three independent toggles are supported (any combination):
 
-    * ``status`` (1|2|3) + optional ``selling_time_id`` — sold-out reasons
-      (Grab's v1 endpoint). Use 1=AVAILABLE, 2=OUT_OF_STOCK_TODAY,
-      3=OUT_OF_STOCK. The customer's app still sees the item but cannot
-      order it.
-    * ``available: bool`` (back-compat) — translated to status=1 (true) or
-      status=3 (false). Use this for the simple on/off Switch case.
-    * ``hidden: bool`` — controls ``eligibleSellingStatus`` (whether the
-      item appears on the storefront at all). When true, customers can't
-      see the item in the menu; merchant can still edit it.
+    * ``status`` (1|2|3|7) + optional ``selling_time_id`` — sold-out /
+      hide reasons (Grab's v1 endpoint).
+        1 = AVAILABLE (sellable, listed)
+        2 = OUT_OF_STOCK_TODAY (listed, can't order until midnight)
+        3 = OUT_OF_STOCK (listed, can't order until merchant toggles back)
+        7 = HIDDEN (not in customer menu at all; merchant still sees it)
+    * ``available: bool`` (back-compat) — translated to status=1 (true)
+      or status=3 (false). Use this for the simple on/off Switch case.
+    * ``hidden: bool`` — convenience alias for ``status=7`` (true) /
+      ``status=1`` (false). The backend prefers ``hidden`` if both are
+      supplied because it conveys intent more clearly.
     """
 
-    status: int | None = Field(default=None, ge=1, le=3)
+    status: AvailabilityStatus | None = None
     selling_time_id: str | None = None
     available: bool | None = None
     hidden: bool | None = None

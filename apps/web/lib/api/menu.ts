@@ -69,17 +69,18 @@ export interface UpdateItemResult {
 export interface UpdateAvailabilityInput {
   /** Bật/tắt đơn giản — backend map sang status=1 (true) / 3 (false). */
   available?: boolean;
-  /** Lý do cụ thể (khớp Grab's v1 endpoint enum):
+  /** Lý do cụ thể (khớp Grab's v1 endpoint enum, verified against
+   *  Menu/monan/{bat_tatmon,hide_monan}.py):
    *  1 = AVAILABLE (bật, cần selling_time_id)
    *  2 = OUT_OF_STOCK_TODAY (hết bán hôm nay)
    *  3 = OUT_OF_STOCK (vẫn hiển thị nhưng không order được)
+   *  7 = HIDDEN (ẩn hoàn toàn khỏi menu khách)
    */
-  status?: 1 | 2 | 3;
+  status?: 1 | 2 | 3 | 7;
   /** Bắt buộc khi status=1 (server sẽ tự fetch nếu thiếu). */
   selling_time_id?: string;
-  /** Ẩn hoàn toàn khỏi menu khách (eligibleSellingStatus=INELIGIBLE).
-   *  Khác với status=3 — item không hiển thị với khách, merchant vẫn edit được.
-   */
+  /** Ẩn hoàn toàn khỏi menu khách → backend map sang status=7.
+   *  Alias cho status=7 (true) / status=1 (false). */
   hidden?: boolean;
 }
 
@@ -243,20 +244,36 @@ export function useUpdateItemAvailability() {
       const prev = qc.getQueryData<MenuPayload>(MENU_KEY);
       if (prev && typeof prev === "object") {
         // Derive optimistic `available` flag from whichever field the caller
-        // supplied. status=1 means ON; status=2/3 mean OFF; `available`
-        // maps directly. `hidden` doesn't change `available` but flips
-        // `eligibleSellingStatus`.
+        // supplied. status=1 means ON (visible + sellable); status=2/3 mean
+        // OFF-but-visible; status=7 means HIDDEN. `hidden` is an alias
+        // for status=7/1. `available` (legacy) maps directly to ON/OFF.
         const optimisticAvailable =
           typeof input.status === "number"
             ? input.status === 1
+            : typeof input.hidden === "boolean"
+            ? input.hidden === false // hidden=false → restore ON
             : typeof input.available === "boolean"
             ? input.available
+            : undefined;
+        const optimisticHidden =
+          typeof input.hidden === "boolean"
+            ? input.hidden
+            : typeof input.status === "number"
+            ? input.status === 7
             : undefined;
         qc.setQueryData<MenuPayload>(
           MENU_KEY,
           toggleAvailability(prev, itemId, {
             available: optimisticAvailable,
-            hidden: input.hidden,
+            hidden: optimisticHidden,
+            status:
+              typeof input.status === "number"
+                ? input.status
+                : optimisticHidden === true
+                ? 7
+                : optimisticHidden === false
+                ? 1
+                : undefined,
           }),
         );
       }
@@ -277,7 +294,7 @@ export function useUpdateItemAvailability() {
 function toggleAvailability(
   menu: MenuPayload,
   itemId: string,
-  patch: { available?: boolean; hidden?: boolean },
+  patch: { available?: boolean; hidden?: boolean; status?: number },
 ): MenuPayload {
   const categories = (menu as { categories?: unknown }).categories;
   if (!Array.isArray(categories)) return menu;
@@ -293,8 +310,15 @@ function toggleAvailability(
         const id = rec.itemID ?? rec.skuID ?? rec.id;
         if (String(id ?? "") !== itemId) return it;
         const updated: Record<string, unknown> = { ...rec };
-        if (typeof patch.available === "boolean") {
-          updated.availableStatus = patch.available ? "AVAILABLE" : "OUT_OF_STOCK";
+        // Mirror the backend: `status` is the source of truth. Setting it
+        // updates both `availableStatus` (numeric) and the human-readable
+        // string Grab returns. Status 7 = HIDDEN.
+        if (typeof patch.status === "number") {
+          updated.availableStatus = patch.status;
+          updated.availableStatusLabel = availableStatusLabel(patch.status);
+        } else if (typeof patch.available === "boolean") {
+          updated.availableStatus = patch.available ? 1 : 3;
+          updated.availableStatusLabel = patch.available ? "AVAILABLE" : "OUT_OF_STOCK";
         }
         if (typeof patch.hidden === "boolean") {
           updated.eligibleSellingStatus = patch.hidden ? "INELIGIBLE" : "ELIGIBLE";
@@ -304,6 +328,22 @@ function toggleAvailability(
     };
   });
   return { ...(menu as Record<string, unknown>), categories: next };
+}
+
+/** Human-readable label for Grab's v1 availableStatus enum. */
+function availableStatusLabel(status: number): string {
+  switch (status) {
+    case 1:
+      return "AVAILABLE";
+    case 2:
+      return "OUT_OF_STOCK_TODAY";
+    case 3:
+      return "OUT_OF_STOCK";
+    case 7:
+      return "HIDDEN";
+    default:
+      return "OUT_OF_STOCK";
+  }
 }
 
 export function useUploadItemImage() {

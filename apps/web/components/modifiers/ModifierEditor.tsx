@@ -19,17 +19,17 @@ import {
 import { useCreateModifierGroup } from "@/lib/api/modifiers";
 
 const modifierSchema = z.object({
-  name: z.string().min(1, "Required"),
-  price_vnd: z.coerce.number().int().min(0, "Must be ≥ 0"),
+  name: z.string().min(1, "Bắt buộc"),
+  price_vnd: z.coerce.number().int().min(0, "Phải ≥ 0"),
 });
 
 const groupSchema = z.object({
-  group_name: z.string().min(1, "Group name required").max(80),
+  group_name: z.string().min(1, "Bắt buộc nhập tên nhóm").max(80),
   selection_range_min: z.coerce.number().int().min(0),
   selection_range_max: z.coerce.number().int().min(1),
-  modifiers: z.array(modifierSchema).min(1, "Add at least one modifier"),
+  modifiers: z.array(modifierSchema).min(1, "Thêm ít nhất một tùy chọn"),
 }).refine((g) => g.selection_range_max >= g.selection_range_min, {
-  message: "Max must be ≥ Min",
+  message: "Max phải ≥ Min",
   path: ["selection_range_max"],
 });
 
@@ -61,24 +61,28 @@ export function ModifierEditor({ onCreated }: ModifierEditorProps) {
         selection_range_max: values.selection_range_max,
         modifiers: values.modifiers,
       });
-      toast.success(`Created "${result.modifier_group_name}"`);
+      toast.success(`Đã tạo nhóm "${result.modifier_group_name}"`);
       onCreated?.({ id: result.modifier_group_id, name: result.modifier_group_name });
       form.reset();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to create modifier group");
+      toast.error(err instanceof Error ? err.message : "Tạo nhóm tùy chọn thất bại");
     }
   }
 
   return (
     <Card className="border-(--color-border)">
       <CardHeader>
-        <CardTitle>New modifier group</CardTitle>
+        <CardTitle>Nhóm tùy chọn mới</CardTitle>
       </CardHeader>
       <form onSubmit={form.handleSubmit(onSubmit)}>
         <CardContent className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="group_name">Group name (Vietnamese)</Label>
-            <Input id="group_name" placeholder="Size, Topping, Sugar level…" {...form.register("group_name")} />
+            <Label htmlFor="group_name">Tên nhóm (tiếng Việt)</Label>
+            <Input
+              id="group_name"
+              placeholder="Kích thước, Topping, Mức đường…"
+              {...form.register("group_name")}
+            />
             {form.formState.errors.group_name && (
               <p className="text-xs text-red-500">{form.formState.errors.group_name.message}</p>
             )}
@@ -86,7 +90,7 @@ export function ModifierEditor({ onCreated }: ModifierEditorProps) {
 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label htmlFor="sel_min">Min selections</Label>
+              <Label htmlFor="sel_min">Chọn tối thiểu</Label>
               <Input
                 id="sel_min"
                 type="number"
@@ -95,7 +99,7 @@ export function ModifierEditor({ onCreated }: ModifierEditorProps) {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="sel_max">Max selections</Label>
+              <Label htmlFor="sel_max">Chọn tối đa</Label>
               <Input
                 id="sel_max"
                 type="number"
@@ -112,7 +116,7 @@ export function ModifierEditor({ onCreated }: ModifierEditorProps) {
 
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <Label>Modifiers</Label>
+              <Label>Các tùy chọn</Label>
               <Button
                 type="button"
                 variant="outline"
@@ -120,7 +124,7 @@ export function ModifierEditor({ onCreated }: ModifierEditorProps) {
                 onClick={() => append({ name: "", price_vnd: 0 })}
               >
                 <Plus className="mr-1.5 h-3.5 w-3.5" />
-                Add modifier
+                Thêm tùy chọn
               </Button>
             </div>
             <div className="space-y-2">
@@ -128,7 +132,7 @@ export function ModifierEditor({ onCreated }: ModifierEditorProps) {
                 <div key={field.id} className="flex items-end gap-2">
                   <div className="flex-1 space-y-1">
                     <Input
-                      placeholder="Modifier name (e.g. Large)"
+                      placeholder="Tên tùy chọn (ví dụ: Lớn)"
                       {...form.register(`modifiers.${idx}.name`)}
                     />
                     {form.formState.errors.modifiers?.[idx]?.name && (
@@ -141,7 +145,7 @@ export function ModifierEditor({ onCreated }: ModifierEditorProps) {
                     <Input
                       type="number"
                       inputMode="numeric"
-                      placeholder="Price"
+                      placeholder="Giá (đ)"
                       {...form.register(`modifiers.${idx}.price_vnd`)}
                     />
                   </div>
@@ -151,7 +155,7 @@ export function ModifierEditor({ onCreated }: ModifierEditorProps) {
                     size="icon"
                     onClick={() => remove(idx)}
                     disabled={fields.length <= 1}
-                    aria-label="Remove modifier"
+                    aria-label="Xóa tùy chọn"
                     className="text-red-500 hover:bg-red-500/10 hover:text-red-500"
                   >
                     <Trash2 className="h-4 w-4" />
@@ -166,14 +170,14 @@ export function ModifierEditor({ onCreated }: ModifierEditorProps) {
         </CardContent>
         <CardFooter className="justify-end gap-2">
           <Button type="button" variant="ghost" onClick={() => form.reset()}>
-            Reset
+            Đặt lại
           </Button>
           <Button
             type="submit"
             disabled={createGroup.isPending}
             className="bg-(--color-brand) text-white hover:bg-(--color-brand-hover)"
           >
-            {createGroup.isPending ? "Creating…" : "Create group"}
+            {createGroup.isPending ? "Đang tạo…" : "Tạo nhóm"}
           </Button>
         </CardFooter>
       </form>

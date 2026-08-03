@@ -230,3 +230,147 @@ async def set_item_availability(
         available_at=available_at,
         eligible_selling_status="ELIGIBLE" if available else "INELIGIBLE",
     )
+
+
+async def set_item_availability_status(
+    client: GrabClient,
+    *,
+    item_id: str,
+    available_status: int,
+    selling_time_id: str | None = None,
+) -> dict:
+    """Set storefront availability via Grab's dedicated v1 endpoint.
+
+    Mirrors `Menu/monan/bat_tatmon.py`: PUT /food/merchant/v1/items/available-status
+    with ``{itemIDs: [...], availableStatus, sellingTimeID?}``. This is the
+    endpoint the merchant mobile app actually calls when toggling item
+    availability from the menu editor — it's lighter than upsert-item and
+    preserves name/price/description automatically.
+
+    `available_status` per Grab:
+        1 = AVAILABLE (item is sellable again)
+        2 = OUT_OF_STOCK_TODAY (sold-out until midnight, then auto-reset)
+        3 = OUT_OF_STOCK (sold-out, hidden from customers until merchant
+            toggles it back to 1)
+
+    `selling_time_id` is required when ``available_status == 1`` to tell
+    Grab when the item is sellable again. Pass the store's existing
+    selling-time ID (e.g. ``VNSLT202408290406064350``); default to the
+    current item's `sellingTimeID` if omitted.
+    """
+    if not item_id:
+        raise ValueError("item_id is required to set availability status")
+    if available_status not in (1, 2, 3):
+        raise ValueError(
+            f"available_status must be 1, 2 or 3 (got {available_status})"
+        )
+
+    payload: dict = {
+        "itemIDs": [item_id],
+        "subDepartmentIDs": [],
+        "departmentIDs": [],
+        "availableStatus": int(available_status),
+    }
+    if selling_time_id:
+        payload["sellingTimeID"] = selling_time_id
+    elif available_status == 1:
+        # The endpoint requires sellingTimeID for status=1. The merchant
+        # app always supplies it; raise so the caller can fetch from menu.
+        raise ValueError(
+            "selling_time_id is required when available_status == 1 (AVAILABLE). "
+            "Fetch the current sellingTimeID from the menu first."
+        )
+
+    res = await client.put("/food/merchant/v1/items/available-status", json=payload)
+    res.raise_for_status()
+    return res.json()
+
+
+async def set_item_visibility(
+    client: GrabClient,
+    *,
+    item_id: str,
+    hidden: bool,
+) -> dict:
+    """Toggle whether an item is visible to customers on the storefront.
+
+    Grab's v1 ``available-status`` endpoint only flips the sellable flag
+    (sold-out today / sold-out forever). It does NOT control whether the
+    item is *listed* on the menu. That is governed by the nested
+    ``eligibleSellingStatus`` field on the item payload, which only the
+    upsert-item endpoint can mutate.
+
+    Semantics:
+        hidden=True  → ``eligibleSellingStatus="INELIGIBLE"`` (item is not
+                       shown to customers; merchant can still edit it).
+        hidden=False → ``eligibleSellingStatus="ELIGIBLE"`` (item appears
+                       on the storefront again).
+
+    On a 5xx from Grab, raises the underlying httpx error.
+    """
+    if not item_id:
+        raise ValueError("item_id is required to toggle visibility")
+
+    from grab.endpoints.menu import get_full_menu
+
+    menu = await get_full_menu(client)
+    if not isinstance(menu, dict):
+        raise ValueError("menu payload from Grab was not a dict")
+
+    target: dict | None = None
+    for cat in menu.get("categories") or []:
+        for item in (cat or {}).get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("itemID") or item.get("skuID") or "") == item_id:
+                target = item
+                break
+        if target is not None:
+            break
+
+    if target is None:
+        raise ValueError(f"item {item_id} not found in current menu")
+
+    name_vi = str(target.get("itemName") or target.get("name") or "")
+    name_en = (
+        ((target.get("nameTranslation") or {}).get("translation") or {}).get("en")
+        or name_vi
+    )
+    description_vi = str(target.get("description") or "")
+    description_en = (
+        ((target.get("descriptionTranslation") or {}).get("translation") or {})
+        .get("en")
+        or description_vi
+    )
+    price_vnd = int(target.get("priceInMin") or target.get("price") or 0)
+    image_urls = list(target.get("imageURLs") or [])
+    webp_urls = list(target.get("webPURLs") or image_urls)
+    webp_url = str(target.get("webPURL") or (webp_urls[0] if webp_urls else ""))
+    linked_modifier_group_ids = list(target.get("linkedModifierGroupIDs") or [])
+    selling_time_id = str(target.get("sellingTimeID") or "AlwaysAvailable")
+    category_id = str(target.get("categoryID") or "")
+    sold_quantity = int(target.get("soldQuantity") or 0)
+    sort_order = target.get("sortOrder")
+    available_at = str(target.get("availableAt") or "0001-01-01T00:00:00.000Z")
+    available_status = int(target.get("availableStatus") or 1)
+
+    return await create_or_update_item(
+        client,
+        name_vi=name_vi,
+        name_en=name_en,
+        description_vi=description_vi,
+        description_en=description_en,
+        price_vnd=price_vnd,
+        category_id=category_id,
+        image_urls=image_urls,
+        webp_urls=webp_urls,
+        webp_url=webp_url,
+        linked_modifier_group_ids=linked_modifier_group_ids,
+        selling_time_id=selling_time_id,
+        item_id=item_id,
+        sold_quantity=sold_quantity,
+        sort_order=int(sort_order) if isinstance(sort_order, (int, float)) else None,
+        available_at=available_at,
+        available_status=available_status,
+        eligible_selling_status="INELIGIBLE" if hidden else "ELIGIBLE",
+    )

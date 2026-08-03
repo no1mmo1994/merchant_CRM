@@ -67,12 +67,27 @@ export interface UpdateItemResult {
 }
 
 export interface UpdateAvailabilityInput {
-  available: boolean;
+  /** Bật/tắt đơn giản — backend map sang status=1 (true) / 3 (false). */
+  available?: boolean;
+  /** Lý do cụ thể (khớp Grab's v1 endpoint enum):
+   *  1 = AVAILABLE (bật, cần selling_time_id)
+   *  2 = OUT_OF_STOCK_TODAY (hết bán hôm nay)
+   *  3 = OUT_OF_STOCK (vẫn hiển thị nhưng không order được)
+   */
+  status?: 1 | 2 | 3;
+  /** Bắt buộc khi status=1 (server sẽ tự fetch nếu thiếu). */
+  selling_time_id?: string;
+  /** Ẩn hoàn toàn khỏi menu khách (eligibleSellingStatus=INELIGIBLE).
+   *  Khác với status=3 — item không hiển thị với khách, merchant vẫn edit được.
+   */
+  hidden?: boolean;
 }
 
 export interface UpdateAvailabilityResult {
   item_id: string;
-  available: boolean;
+  available?: boolean | null;
+  status?: number | null;
+  hidden?: boolean | null;
 }
 
 export interface UploadImageResult {
@@ -227,7 +242,23 @@ export function useUpdateItemAvailability() {
       await qc.cancelQueries({ queryKey: MENU_KEY });
       const prev = qc.getQueryData<MenuPayload>(MENU_KEY);
       if (prev && typeof prev === "object") {
-        qc.setQueryData<MenuPayload>(MENU_KEY, toggleAvailability(prev, itemId, input.available));
+        // Derive optimistic `available` flag from whichever field the caller
+        // supplied. status=1 means ON; status=2/3 mean OFF; `available`
+        // maps directly. `hidden` doesn't change `available` but flips
+        // `eligibleSellingStatus`.
+        const optimisticAvailable =
+          typeof input.status === "number"
+            ? input.status === 1
+            : typeof input.available === "boolean"
+            ? input.available
+            : undefined;
+        qc.setQueryData<MenuPayload>(
+          MENU_KEY,
+          toggleAvailability(prev, itemId, {
+            available: optimisticAvailable,
+            hidden: input.hidden,
+          }),
+        );
       }
       return { prev };
     },
@@ -238,8 +269,16 @@ export function useUpdateItemAvailability() {
   });
 }
 
-/** Walk the cached menu and flip `availableStatus` on the matching item. */
-function toggleAvailability(menu: MenuPayload, itemId: string, available: boolean): MenuPayload {
+/**
+ * Walk the cached menu and flip availableStatus + eligibleSellingStatus
+ * on the matching item. Both are optional — pass only the field you want
+ * to change.
+ */
+function toggleAvailability(
+  menu: MenuPayload,
+  itemId: string,
+  patch: { available?: boolean; hidden?: boolean },
+): MenuPayload {
   const categories = (menu as { categories?: unknown }).categories;
   if (!Array.isArray(categories)) return menu;
   const next = categories.map((cat) => {
@@ -253,7 +292,14 @@ function toggleAvailability(menu: MenuPayload, itemId: string, available: boolea
         const rec = it as Record<string, unknown>;
         const id = rec.itemID ?? rec.skuID ?? rec.id;
         if (String(id ?? "") !== itemId) return it;
-        return { ...rec, availableStatus: available ? "AVAILABLE" : "OUT_OF_STOCK" };
+        const updated: Record<string, unknown> = { ...rec };
+        if (typeof patch.available === "boolean") {
+          updated.availableStatus = patch.available ? "AVAILABLE" : "OUT_OF_STOCK";
+        }
+        if (typeof patch.hidden === "boolean") {
+          updated.eligibleSellingStatus = patch.hidden ? "INELIGIBLE" : "ELIGIBLE";
+        }
+        return updated;
       }),
     };
   });

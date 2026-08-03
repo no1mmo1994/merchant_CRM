@@ -16,6 +16,7 @@ import {
 } from "@/lib/api/menu";
 import { ApiError } from "@/lib/api";
 import { EditItemDialog } from "@/components/menu/EditItemDialog";
+import { ItemAvailabilityDialog } from "@/components/menu/ItemAvailabilityDialog";
 import { toast } from "sonner";
 
 /** A modifier group attached to a menu item (e.g. "Topping"). */
@@ -39,6 +40,12 @@ export interface MenuItemData {
   description?: string;
   imageUrl?: string;
   available?: boolean;
+  /**
+   * Ẩn hoàn toàn khỏi menu khách (eligibleSellingStatus=INELIGIBLE).
+   * Khác với `available=false` — item vẫn hiển thị ở storefront, chỉ
+   * không order được. `hidden=true` thì item biến mất cho tới khi bật lại.
+   */
+  hidden?: boolean;
   /** Modifier groups attached to this item (parsed from Grab's `modifierGroups`). */
   modifierGroups?: ItemModifierGroup[];
 }
@@ -162,7 +169,7 @@ export function CategoryCard({ category, onDelete }: CategoryCardProps) {
           </button>
         )}
 
-        <div className="flex-1 truncate">
+        <div className="flex-1 min-w-0">
           <div className="truncate text-sm font-medium text-(--color-foreground)">
             {category.name}
           </div>
@@ -171,6 +178,15 @@ export function CategoryCard({ category, onDelete }: CategoryCardProps) {
               {category.itemCount} món
             </div>
           )}
+          {/* Grab categoryID — useful for debugging / cross-reference with
+              the merchant script. Kept muted + monospace + truncated so it
+              doesn't crowd the header. */}
+          <div
+            className="truncate font-mono text-[10px] text-(--color-muted-foreground)/70"
+            title={category.id}
+          >
+            {category.id}
+          </div>
         </div>
         <Button
           variant="ghost"
@@ -250,20 +266,39 @@ interface ItemRowProps {
 
 function ItemRow({ item, categoryId }: ItemRowProps) {
   const updateAvailability = useUpdateItemAvailability();
+  const [stopDialogOpen, setStopDialogOpen] = React.useState(false);
 
   // Single source of truth for the Switch: derive from the cached query
   // (which itself has been optimistically mutated by `useUpdateItemAvailability`).
   // This avoids the dual-layer state where local + cache could disagree on
   // rollback. The cache's `onError` rolls back; on success the server
   // snapshot takes over.
-  const available = item.available ?? true;
+  //
+  // Available = sellable AND listed on the storefront. An item can be:
+  //   - available=true,  hidden=false → bán được, hiển thị
+  //   - available=false, hidden=false → không bán được, vẫn hiển thị
+  //   - available=true,  hidden=true  → không hiển thị (trạng thái tạm thời
+  //                                     khi merchant vừa ẩn nhưng chưa tắt)
+  //   - available=false, hidden=true  → ẩn hoàn toàn
+  // The Switch only reflects the "actually sellable & visible" composite.
+  const available = !item.hidden && (item.available ?? true);
 
   async function handleToggle(next: boolean) {
+    // OFF (next=false) → open dialog so the merchant picks a reason
+    // (matches screenshot "Đổi trạng thái" UX).
+    if (!next) {
+      setStopDialogOpen(true);
+      return;
+    }
+    // ON (next=true) → restore both sold-out + visibility. The backend
+    // grabs the current sellingTimeID from the menu snapshot so we don't
+    // need to fetch it here.
     try {
       await updateAvailability.mutateAsync({
         itemId: item.id,
-        input: { available: next },
+        input: { status: 1, hidden: false },
       });
+      toast.success(`Đã bật "${item.name}"`);
     } catch (err) {
       const msg = err instanceof ApiError
         ? err.message
@@ -342,6 +377,18 @@ function ItemRow({ item, categoryId }: ItemRowProps) {
         </p>
       )}
 
+      {/* Grab itemID — displayed muted + monospace so the merchant can copy
+          paste it into the edit script when needed. Indented to align with
+          the row's body (past the 48px thumbnail). */}
+      {item.id && (
+        <p
+          className="mt-0.5 truncate pl-[3.75rem] font-mono text-[10px] text-(--color-muted-foreground)/60"
+          title={item.id}
+        >
+          {item.id}
+        </p>
+      )}
+
       {/* Modifier groups attached to this item */}
       {item.modifierGroups && item.modifierGroups.length > 0 && (
         <div className="mt-2 ml-[3.75rem] space-y-1.5">
@@ -396,6 +443,15 @@ function ItemRow({ item, categoryId }: ItemRowProps) {
           })}
         </div>
       )}
+
+      {/* Status-change dialog (mirrors Grab's mobile "Đổi trạng thái" UX).
+          Controlled by the Switch's OFF path so the merchant picks a
+          reason (today / forever / hide). ON path bypasses the dialog. */}
+      <ItemAvailabilityDialog
+        item={item}
+        open={stopDialogOpen}
+        onOpenChange={setStopDialogOpen}
+      />
     </div>
   );
 }

@@ -14,14 +14,15 @@ import {
   arrayMove,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
-import { Plus } from "lucide-react";
+import { Plus, RefreshCw } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { CategoryCard, type CategoryData, type MenuItemData } from "./CategoryCard";
-import { useCreateCategory, useSortCategories, type MenuPayload } from "@/lib/api/menu";
+import { useCreateCategory, useSortCategories, MENU_KEY, type MenuPayload } from "@/lib/api/menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
+import { useIsFetching, useQueryClient } from "@tanstack/react-query";
 
 interface MenuTreeProps {
   /** Menu payload from /api/menu. We only need the categories list shape. */
@@ -65,6 +66,15 @@ function parseCategories(menu?: MenuPayload): CategoryData[] {
       const imageUrl = String(item.imageURL ?? item.imageUrl ?? item.photo ?? "");
       const description = String(item.description ?? item.desc ?? "");
       const availableStatus = item.availableStatus;
+      // eligibleSellingStatus controls whether the item is *listed* on the
+      // storefront — independent from sold-out (availableStatus). Items with
+      // status "INELIGIBLE" are hidden from customers but still editable
+      // server-side. We surface this as `hidden` on the row so the Switch
+      // and ItemAvailabilityDialog can react to it.
+      const eligibleSellingStatus = String(
+        item.eligibleSellingStatus ?? "ELIGIBLE",
+      );
+      const hidden = eligibleSellingStatus === "INELIGIBLE";
 
       // Parse modifier groups embedded inside each item.
       // Grab shape: { modifierGroups: [{ modifierGroupID, modifierGroupName,
@@ -118,6 +128,7 @@ function parseCategories(menu?: MenuPayload): CategoryData[] {
         description: description || undefined,
         imageUrl: imageUrl || undefined,
         available: availableStatus === 1 || availableStatus === true,
+        hidden,
         modifierGroups:
           modifierGroups.length > 0 ? modifierGroups : undefined,
       };
@@ -147,6 +158,16 @@ export function MenuTree({ menu, isLoading }: MenuTreeProps) {
 
   const createCategory = useCreateCategory();
   const sortCategories = useSortCategories();
+  const qc = useQueryClient();
+  // useIsFetching reports any in-flight query under MENU_KEY so the reload
+  // button can spin while the refetch is running. This covers both the
+  // initial load and any subsequent invalidation triggered elsewhere.
+  const isReloading = useIsFetching({ queryKey: MENU_KEY }) > 0;
+
+  function handleReload() {
+    qc.invalidateQueries({ queryKey: MENU_KEY });
+    toast.success("Đang tải lại thực đơn…");
+  }
   const [newName, setNewName] = React.useState("");
 
   async function handleAdd(e: React.FormEvent) {
@@ -190,8 +211,21 @@ export function MenuTree({ menu, isLoading }: MenuTreeProps) {
 
   return (
     <Card className="border-(--color-border)">
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0">
         <CardTitle>Danh mục thực đơn</CardTitle>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={handleReload}
+          disabled={isReloading}
+          aria-label="Tải lại thực đơn"
+          title="Tải lại thực đơn từ Grab"
+          className="h-8 gap-1.5 text-(--color-muted-foreground) hover:text-(--color-foreground)"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${isReloading ? "animate-spin" : ""}`} />
+          <span className="text-xs">Tải lại</span>
+        </Button>
       </CardHeader>
       <CardContent className="space-y-4">
         <form onSubmit={handleAdd} className="flex gap-2">

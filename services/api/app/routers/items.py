@@ -172,6 +172,8 @@ async def create_item(
         price_vnd=body.price_vnd,
         category_id=body.category_id,
         image_urls=body.image_urls,
+        webp_urls=body.image_urls,  # mirror JPGs — browser will fall back
+        webp_url=body.image_urls[0] if body.image_urls else None,
         linked_modifier_group_ids=body.linked_modifier_group_ids,
     )
 
@@ -233,6 +235,10 @@ def _extract_item_locales(item: dict) -> dict[str, Any]:
         .get("en")
         or description_vi
     )
+    image_urls = list(item.get("imageURLs") or [])
+    webp_urls = list(item.get("webPURLs") or image_urls)
+    webp_url = str(item.get("webPURL") or (webp_urls[0] if webp_urls else ""))
+    sort_order = item.get("sortOrder")
     return {
         "name_vi": name_vi,
         "name_en": name_en,
@@ -240,14 +246,20 @@ def _extract_item_locales(item: dict) -> dict[str, Any]:
         "description_en": description_en,
         "price_vnd": int(item.get("priceInMin") or item.get("price") or 0),
         "category_id": str(item.get("categoryID") or ""),
-        "image_urls": list(item.get("imageURLs") or []),
+        "image_urls": image_urls,
+        "webp_urls": webp_urls,
+        "webp_url": webp_url,
         "linked_modifier_group_ids": list(item.get("linkedModifierGroupIDs") or []),
         "selling_time_id": str(item.get("sellingTimeID") or "AlwaysAvailable"),
         # Preserve current availability so an edit doesn't silently re-enable
         # items that the merchant had marked OUT_OF_STOCK. Grab's upsert-item
         # treats the full payload as authoritative, so omission/empty here
         # would let the upstream default re-enable the item.
-        "eligible_selling_status": str(item.get("eligibleSellingStatus") or ""),
+        "eligible_selling_status": str(item.get("eligibleSellingStatus") or "ELIGIBLE"),
+        "available_status": int(item.get("availableStatus") or 1),
+        "sold_quantity": int(item.get("soldQuantity") or 0),
+        "sort_order": int(sort_order) if isinstance(sort_order, (int, float)) else None,
+        "available_at": str(item.get("availableAt") or "0001-01-01T00:00:00.000Z"),
     }
 
 
@@ -301,10 +313,16 @@ async def update_item(
             price_vnd=locales["price_vnd"],
             category_id=locales["category_id"],
             image_urls=locales["image_urls"],
+            webp_urls=locales["webp_urls"],
+            webp_url=locales["webp_url"],
             linked_modifier_group_ids=locales["linked_modifier_group_ids"],
             selling_time_id=locales["selling_time_id"],
             item_id=item_id,
             eligible_selling_status=locales["eligible_selling_status"],
+            available_status=locales["available_status"],
+            sold_quantity=locales["sold_quantity"],
+            sort_order=locales["sort_order"],
+            available_at=locales["available_at"],
         )
     except httpx.HTTPStatusError as exc:
         log.warning("Grab upsert-item rejected for %s: %s", item_id, exc)

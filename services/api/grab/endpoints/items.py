@@ -57,44 +57,92 @@ async def create_or_update_item(
     price_vnd: int,
     category_id: str,
     image_urls: list[str] | None = None,
+    webp_urls: list[str] | None = None,
+    webp_url: str | None = None,
     linked_modifier_group_ids: list[str] | None = None,
     selling_time_id: str = "AlwaysAvailable",
     item_id: str | None = None,
-    eligible_selling_status: str = "",
+    eligible_selling_status: str = "ELIGIBLE",
+    available_status: int = 1,
+    sold_quantity: int = 0,
+    sort_order: int | None = None,
+    available_at: str = "0001-01-01T00:00:00.000Z",
 ) -> dict:
     """POST /food/merchant/v2/upsert-item — create or update a menu item.
 
-    Granular keyword-only arguments keep call sites readable from the
-    FastAPI layer. The full payload shape mirrors the original `taomon.py`.
+    The payload mirrors the shape Grab's mobile app actually sends
+    (verified against `Menu/monan/edit_monan.py` which the merchant
+    uses for one-off edits). Earlier versions of this helper sent a
+    slimmer payload that Grab's API silently rejected with 4xx — the
+    full set of fields below is required, especially `priceDisplay`,
+    `priceRange`, `serviceTypePriceRange`, `webPURL(s)`, `itemID`
+    nested in `item`, and a top-level `categoryID`.
 
     `eligible_selling_status` controls whether the item is sellable on
-    the storefront. Grab accepts an empty string (default = unchanged)
-    or one of `"AVAILABLE"` / `"OUT_OF_STOCK"`. When updating only
-    availability, callers should pass the existing item fields back in
-    alongside the new status.
+    the storefront. Use `"ELIGIBLE"` for new / available items, or
+    `"INELIGIBLE"` to hide them. Default is "ELIGIBLE" so callers
+    that don't care still get a create-able item.
     """
-    payload = {
-        "item": {
-            "specialItemType": "",
-            "nameTranslation": {
-                "translation": {"ko": "", "ja": "", "en": name_en, "zh": ""},
-                "originalTranslationFromDS": {"en": name_en},
-            },
-            "descriptionTranslation": {
-                "translation": {"ko": "", "ja": "", "en": description_en, "zh": ""},
-                "originalTranslationFromDS": {"en": description_en},
-            },
-            "description": description_vi,
-            "linkedModifierGroupIDs": linked_modifier_group_ids or [],
-            "itemName": name_vi,
-            "soldByWeight": False,
-            "aiGeneratedFields": [],
-            "priceInMin": int(price_vnd),
-            "imageURLs": image_urls or [],
-            "sellingTimeID": selling_time_id,
-            "eligibleSellingStatus": eligible_selling_status,
-            "skuID": item_id or "",
+    # Format prices as Grab expects: "1.325.000₫" with a VND dot
+    # thousands separator followed by the dong sign. Grab's parser
+    # accepts integers-only too, but the dotted form is what the
+    # mobile app sends and the upstream rejected our int-only form.
+    price_in_min = int(price_vnd)
+    price_display = f"{price_in_min:,}".replace(",", ".") + "₫"
+
+    # webP URL(s) per item. The merchant app always sends one webP
+    # per JPG; if the caller doesn't know the webP variants it's
+    # safe to mirror the JPG list (browsers will fall back).
+    img_urls = image_urls or []
+    webp_urls = webp_urls or img_urls
+    webp_url = webp_url or (webp_urls[0] if webp_urls else "")
+
+    item_block: dict = {
+        # itemID lives nested under `item`, NOT as a top-level `skuID`.
+        # Putting it in `skuID` made Grab reject the request with 4xx.
+        "itemID": item_id or "",
+        "itemName": name_vi,
+        "description": description_vi,
+        "priceInMin": price_in_min,
+        "priceDisplay": price_display,
+        "priceRange": price_display,
+        "serviceTypePriceRange": {
+            "DineIn": price_display,
+            "Delivery": price_display,
         },
+        "imageURLs": img_urls,
+        "webPURLs": webp_urls,
+        "webPURL": webp_url,
+        "categoryID": category_id,
+        "specialItemType": "",
+        "nameTranslation": {
+            "translation": {"ko": "", "ja": "", "en": name_en, "zh": ""},
+            "originalTranslationFromDS": {},
+        },
+        "parentItemClassName": "",
+        "itemClassName": "",
+        "descriptionTranslation": {
+            "translation": {"ko": "", "ja": "", "en": description_en, "zh": ""},
+            "originalTranslationFromDS": {},
+        },
+        "linkedModifierGroupIDs": linked_modifier_group_ids or [],
+        "categoryName": "",
+        "soldQuantity": int(sold_quantity),
+        "availableAt": available_at,
+        "soldByWeight": False,
+        "supportedAttributeClusterIDs": [],
+        "aiGeneratedFields": [],
+        "availableStatus": int(available_status),
+        "sellingTimeID": selling_time_id,
+        "parentItemClassID": "",
+        "eligibleSellingStatus": eligible_selling_status,
+        "skuID": "",
+    }
+    if sort_order is not None:
+        item_block["sortOrder"] = int(sort_order)
+
+    payload = {
+        "item": item_block,
         "itemAttributeValues": [],
         "categoryID": category_id,
     }
@@ -154,9 +202,14 @@ async def set_item_availability(
     )
     price_vnd = int(target.get("priceInMin") or target.get("price") or 0)
     image_urls = list(target.get("imageURLs") or [])
+    webp_urls = list(target.get("webPURLs") or image_urls)
+    webp_url = str(target.get("webPURL") or (webp_urls[0] if webp_urls else ""))
     linked_modifier_group_ids = list(target.get("linkedModifierGroupIDs") or [])
     selling_time_id = str(target.get("sellingTimeID") or "AlwaysAvailable")
     category_id = str(target.get("categoryID") or "")
+    sold_quantity = int(target.get("soldQuantity") or 0)
+    sort_order = target.get("sortOrder")
+    available_at = str(target.get("availableAt") or "0001-01-01T00:00:00.000Z")
 
     return await create_or_update_item(
         client,
@@ -167,8 +220,13 @@ async def set_item_availability(
         price_vnd=price_vnd,
         category_id=category_id,
         image_urls=image_urls,
+        webp_urls=webp_urls,
+        webp_url=webp_url,
         linked_modifier_group_ids=linked_modifier_group_ids,
         selling_time_id=selling_time_id,
         item_id=item_id,
-        eligible_selling_status="AVAILABLE" if available else "OUT_OF_STOCK",
+        sold_quantity=sold_quantity,
+        sort_order=int(sort_order) if isinstance(sort_order, (int, float)) else None,
+        available_at=available_at,
+        eligible_selling_status="ELIGIBLE" if available else "INELIGIBLE",
     )

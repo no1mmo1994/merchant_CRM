@@ -1,0 +1,44 @@
+fix(menu): match upsert-item payload to mobile app shape
+
+Grab's /food/merchant/v2/upsert-item rejects slimmer payloads with 4xx
+("Grab từ chối cập nhật món"). The working script
+`Menu/monan/edit_monan.py` shows the exact field set the mobile app
+sends; rewriting our helper to match it makes edit + create-with-
+description succeed.
+
+services/api/grab/endpoints/items.py
+- create_or_update_item: full payload — `itemID` nested in `item`,
+  `priceDisplay`/`priceRange` as "1.325.000₫" (dot thousands + dong),
+  `serviceTypePriceRange.{DineIn,Delivery}`, `webPURLs` + `webPURL`,
+  top-level `categoryID` + nested `item.categoryID`,
+  `eligibleSellingStatus` ("ELIGIBLE"/"INELIGIBLE"), `availableStatus`,
+  `soldQuantity`, `availableAt`, `sortOrder`, `sellingTimeID`,
+  `linkedModifierGroupIDs`, empty `nameTranslation` /
+  `descriptionTranslation` blocks for `ko/ja/en/zh`.
+- New params: `eligible_selling_status`, `available_status`,
+  `sold_quantity`, `sort_order`, `available_at`, `webp_urls`, `webp_url`.
+- set_item_availability: forward every field above when flipping
+  ELIGIBLE/INELIGIBLE — otherwise Grab's upsert would reset
+  webP/image/sortOrder/soldQuantity to upstream defaults.
+
+services/api/app/routers/items.py
+- _extract_item_locales: pull webp_urls, webp_url, available_status,
+  sold_quantity, sort_order, available_at, eligible_selling_status
+  from current item so updates preserve merchant-set state
+  (HIGH: an edit no longer silently re-enables OUT_OF_STOCK items).
+- update_item: pass full payload including all new fields.
+- create_item: mirror webp_urls + webp_url from image_urls as a
+  browser-fallback.
+
+Why
+- Edit dialog + new-item form both failed with "Grab từ chối cập nhật
+  món" because the payload was missing priceDisplay/priceRange/
+  serviceTypePriceRange/webPURLs and several other required fields.
+- Verified the working edit script's payload shape and replicated it
+  1:1 in our helper.
+
+Verified
+- uvicorn restarted (PID 50228, no --reload).
+- All 5 routes register: /api/items/upload-image, /api/items/,
+  /api/items, /api/items/{item_id} (PUT), /api/items/{item_id}/availability (PATCH).
+- create_or_update_item + set_item_availability import with new params.

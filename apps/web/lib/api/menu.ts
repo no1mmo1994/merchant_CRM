@@ -78,6 +78,10 @@ async function createItem(input: CreateItemInput): Promise<CreateItemResult> {
 /**
  * Multipart upload for a menu-item image. The backend stores the file
  * temporarily and forwards it to Grab; we receive the hosted URL.
+ *
+ * Error envelope from the backend looks like
+ *   { detail: { code: "grab_rejected_upload", message: "...", grab_status: 409, ... } }
+ * — we want `message` (not raw JSON) to reach `toast.error()`.
  */
 async function uploadImage(file: File): Promise<UploadImageResult> {
   const fd = new FormData();
@@ -89,7 +93,28 @@ async function uploadImage(file: File): Promise<UploadImageResult> {
   });
   const text = await res.text();
   if (!res.ok) {
-    throw new ApiError(res.status, text || `HTTP ${res.status}`, text);
+    let parsed: unknown = text;
+    if (text && res.headers.get("content-type")?.includes("application/json")) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        /* leave parsed = text */
+      }
+    }
+    let message = `HTTP ${res.status}`;
+    if (parsed && typeof parsed === "object" && "detail" in parsed) {
+      const detail = (parsed as { detail: unknown }).detail;
+      if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+        const d = detail as Record<string, unknown>;
+        if (typeof d.message === "string" && d.message) message = d.message;
+        else if (typeof d.code === "string" && d.code) message = d.code;
+      } else if (typeof detail === "string" && detail.trim()) {
+        message = detail.trim();
+      }
+    } else if (text) {
+      message = text;
+    }
+    throw new ApiError(res.status, message, parsed);
   }
   return JSON.parse(text) as UploadImageResult;
 }

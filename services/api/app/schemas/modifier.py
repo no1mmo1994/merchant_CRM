@@ -54,6 +54,11 @@ class ModifierGroup(BaseModel):
     Mirrors Grab's `modifierGroups` array under each item:
       { modifierGroupID, modifierGroupName, selectionRangeMin,
         selectionRangeMax, modifiers: [...] }
+
+    `linked_item_count` is computed by walking the menu's category tree
+    and counting how many items reference this group (so the UI can
+    render "Liên kết với X món"). It is 0 when we have no menu data
+    to walk (e.g. direct endpoint returned no embedded groups).
     """
 
     modifier_group_id: str = ""
@@ -61,10 +66,20 @@ class ModifierGroup(BaseModel):
     selection_range_min: int = 0
     selection_range_max: int = 1
     modifiers: list[ModifierOption] = []
+    linked_item_count: int = 0
 
 
 class ListModifierGroupsResponse(BaseModel):
-    """Wrapper for the full store-wide modifier-group list."""
+    """Wrapper for the full store-wide modifier-group list.
+
+    `partial` is true when the list was assembled from a fallback path
+    (e.g. dedupe of menu-embedded modifier groups) instead of Grab's
+    authoritative `/menu/modifier-groups` endpoint. `source` is a
+    short tag for the UI to render an info hint: `"direct"`,
+    `"menu_fallback"`, or `"empty"`.
+    """
 
     modifier_groups: list[ModifierGroup] = []
     total: int = 0
+    partial: bool = False
+    source: str = "direct"

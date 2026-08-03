@@ -1,39 +1,153 @@
 "use client";
 
 import * as React from "react";
+import { AlertTriangle, ChevronDown } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import { ModifierEditor } from "@/components/modifiers/ModifierEditor";
-import { ModifierPickerChip } from "@/components/modifiers/ModifierPickerChip";
-import type { PickerModifierOption } from "@/components/modifiers/ModifierPickerChip";
-import { useModifierGroups, type ModifierGroup, type ModifierOption } from "@/lib/api/modifiers";
+import {
+  listModifierGroupsRaw,
+  type ModifierGroup,
+  type ModifierOption,
+  type ListModifierGroupsResponse,
+} from "@/lib/api/modifiers";
 import { ApiError } from "@/lib/api";
 import { toast } from "sonner";
-
-/**
- * Convert a backend `ModifierOption` into the shape consumed by
- * `ModifierPickerChip` so the preview panel can render the option
- * chips the same way the menu item editor would.
- */
-function toPickerOption(opt: ModifierOption): PickerModifierOption {
-  return {
-    id: opt.modifier_id,
-    name: opt.modifier_name,
-    priceVnd: opt.price_vnd,
-    available: opt.available_status === 1 || opt.available_status === undefined || opt.available_status === null,
-  };
-}
+import { cn } from "@/lib/utils";
 
 /** Format a VND price in `12.000đ` style used by the Grab Merchant app. */
 function formatVnd(value: number): string {
   return `${value.toLocaleString("vi-VN")}đ`;
 }
 
+interface GroupCardProps {
+  group: ModifierGroup;
+}
+
+/**
+ * Collapsible group card. Header shows the group name and how many
+ * menu items reference it ("Liên kết với X món"). Click to expand
+ * the list of modifier rows; each row has an availability toggle.
+ */
+function GroupCard({ group }: GroupCardProps) {
+  const [open, setOpen] = React.useState(false);
+  const bodyId = React.useId();
+  return (
+    <div className="overflow-hidden rounded-lg border border-(--color-border) bg-(--color-surface-2)">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={bodyId}
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between gap-2 p-4 text-left transition-colors hover:bg-(--color-surface-3)/40"
+      >
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium text-(--color-foreground)">
+            {group.modifier_group_name || "(Không tên)"}
+          </div>
+          <div className="mt-0.5 text-xs text-(--color-muted-foreground)">
+            Liên kết với {group.linked_item_count ?? 0} món
+          </div>
+        </div>
+        <ChevronDown
+          className={cn(
+            "h-4 w-4 shrink-0 text-(--color-muted-foreground) transition-transform",
+            open && "rotate-180",
+          )}
+        />
+      </button>
+      {open && (
+        <div id={bodyId} className="border-t border-(--color-border) bg-(--color-background)">
+          {group.modifiers.length === 0 ? (
+            <p className="px-4 py-3 text-xs text-(--color-muted-foreground)">
+              Nhóm này hiện chưa có tùy chọn nào.
+            </p>
+          ) : (
+            <ul className="divide-y divide-(--color-border)">
+              {group.modifiers.map((m: ModifierOption) => (
+                <ModifierRow key={m.modifier_id || m.modifier_name} modifier={m} />
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface ModifierRowProps {
+  modifier: ModifierOption;
+}
+
+/**
+ * Single modifier row: name + price on the left, availability
+ * toggle on the right. Availability defaults to true when Grab
+ * doesn't report an explicit status.
+ */
+function ModifierRow({ modifier }: ModifierRowProps) {
+  // available_status: 1 = available, 0 = unavailable. Treat null/undefined as available.
+  const initial = modifier.available_status !== 0;
+  const [available, setAvailable] = React.useState(initial);
+
+  // Sync if the upstream data changes (e.g. after a reload).
+  React.useEffect(() => {
+    setAvailable(modifier.available_status !== 0);
+  }, [modifier.available_status, modifier.modifier_id]);
+
+  return (
+    <li className="flex items-center justify-between gap-3 px-4 py-3">
+      <div className="min-w-0">
+        <div
+          className={cn(
+            "truncate text-sm",
+            available ? "text-(--color-foreground)" : "text-(--color-muted-foreground) line-through",
+          )}
+        >
+          {modifier.modifier_name || "(Không tên)"}
+        </div>
+        <div className="mt-0.5 text-xs text-(--color-muted-foreground)">
+          {modifier.is_need_extra_cost ? formatVnd(modifier.price_vnd) : "Miễn phí"}
+        </div>
+      </div>
+      <Switch
+        checked={available}
+        onCheckedChange={setAvailable}
+        aria-label={`Bật/tắt ${modifier.modifier_name || "tùy chọn"}`}
+      />
+    </li>
+  );
+}
+
 export function ModifiersClient() {
-  const { data: groups = [], isLoading, error } = useModifierGroups();
-  const [pickerSelection, setPickerSelection] = React.useState<Record<string, string[]>>({});
+  const [groups, setGroups] = React.useState<ModifierGroup[]>([]);
+  const [partial, setPartial] = React.useState(false);
+  const [source, setSource] = React.useState<"direct" | "menu_fallback" | "empty" | null>(null);
+  const [isLoading, setIsLoading] = React.useState(true);
+  const [error, setError] = React.useState<unknown>(null);
+
+  const reload = React.useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const res: ListModifierGroupsResponse = await listModifierGroupsRaw();
+      setGroups(res.modifier_groups ?? []);
+      setPartial(res.partial ?? false);
+      setSource(res.source ?? "direct");
+    } catch (err) {
+      setError(err);
+      setGroups([]);
+      setPartial(false);
+      setSource(null);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void reload();
+  }, [reload]);
 
   React.useEffect(() => {
     if (error instanceof ApiError) {
@@ -44,7 +158,7 @@ export function ModifiersClient() {
   return (
     <div className="grid gap-6 lg:grid-cols-5">
       <div className="lg:col-span-3">
-        <ModifierEditor />
+        <ModifierEditor onCreated={() => void reload()} />
       </div>
       <div className="space-y-4 lg:col-span-2">
         <Card className="border-(--color-border)">
@@ -55,6 +169,15 @@ export function ModifiersClient() {
             </div>
           </CardHeader>
           <CardContent className="space-y-3">
+            {partial && (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-50/50 p-2.5 text-xs text-amber-800">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>
+                  Grab tạm thời không trả được danh sách nhóm tùy chọn — hiển thị
+                  dữ liệu lấy từ thực đơn. Có thể thiếu nhóm chưa gắn vào món nào.
+                </span>
+              </div>
+            )}
             {isLoading ? (
               <div className="space-y-2">
                 {[0, 1, 2].map((i) => (
@@ -66,80 +189,19 @@ export function ModifiersClient() {
                 Chưa có nhóm nào. Tạo một nhóm bên trái hoặc đồng bộ từ Grab.
               </div>
             ) : (
-              groups.map((g: ModifierGroup) => {
-                const pickerOpts = g.modifiers.map(toPickerOption);
-                const minMax =
-                  g.selection_range_min === g.selection_range_max
-                    ? `${g.selection_range_max}`
-                    : `${g.selection_range_min}–${g.selection_range_max}`;
-                return (
-                  <div
+              <div className="space-y-2">
+                {groups.map((g) => (
+                  <GroupCard
                     key={g.modifier_group_id || g.modifier_group_name}
-                    className="rounded-lg border border-(--color-border) bg-(--color-surface-2) p-3"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-sm font-medium text-(--color-foreground)">
-                        {g.modifier_group_name || "(Không tên)"}
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <Badge variant="outline" className="text-xs">
-                          {minMax} lựa chọn
-                        </Badge>
-                        <Badge variant="secondary" className="text-xs">
-                          {g.modifiers.length} món
-                        </Badge>
-                      </div>
-                    </div>
-
-                    {g.modifiers.length > 0 ? (
-                      <>
-                        <Separator className="my-2" />
-                        <div className="space-y-1">
-                          {g.modifiers.map((m) => (
-                            <div
-                              key={m.modifier_id || m.modifier_name}
-                              className="flex items-center justify-between gap-2 text-xs"
-                            >
-                              <span
-                                className={
-                                  m.available_status === 0
-                                    ? "text-(--color-muted-foreground) line-through"
-                                    : "text-(--color-foreground)"
-                                }
-                              >
-                                {m.modifier_name || "(Không tên)"}
-                              </span>
-                              <span className="text-(--color-muted-foreground)">
-                                {m.is_need_extra_cost
-                                  ? `+${formatVnd(m.price_vnd)}`
-                                  : "Miễn phí"}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-
-                        <Separator className="my-2" />
-                        <ModifierPickerChip
-                          groupName={g.modifier_group_name}
-                          options={pickerOpts}
-                          multi={g.selection_range_max > 1}
-                          value={pickerSelection[g.modifier_group_id] ?? []}
-                          onChange={(ids) =>
-                            setPickerSelection((prev) => ({
-                              ...prev,
-                              [g.modifier_group_id]: ids,
-                            }))
-                          }
-                        />
-                      </>
-                    ) : (
-                      <p className="mt-2 text-xs text-(--color-muted-foreground)">
-                        Nhóm này hiện chưa có tùy chọn nào.
-                      </p>
-                    )}
-                  </div>
-                );
-              })
+                    group={g}
+                  />
+                ))}
+              </div>
+            )}
+            {!isLoading && source && source !== "direct" && (
+              <p className="pt-1 text-[10px] text-(--color-muted-foreground)/60">
+                Nguồn: {source}
+              </p>
             )}
           </CardContent>
         </Card>

@@ -38,6 +38,21 @@ export interface ModifierGroup {
   selection_range_min: number;
   selection_range_max: number;
   modifiers: ModifierOption[];
+  /** How many menu items currently reference this group ("Liên kết với X món"). */
+  linked_item_count?: number;
+}
+
+/**
+ * Backend's `/api/modifiers` payload. `partial: true` indicates the
+ * list came from the menu-fallback path (Grab's authoritative
+ * `/menu/modifier-groups` was unreachable) — the UI can show an info
+ * hint but the data is still usable.
+ */
+export interface ListModifierGroupsResponse {
+  modifier_groups: ModifierGroup[];
+  total: number;
+  partial: boolean;
+  source: "direct" | "menu_fallback" | "empty";
 }
 
 export interface CreateModifierGroupInput {
@@ -55,10 +70,13 @@ export interface CreateModifierGroupResult {
 const MODIFIER_GROUPS_KEY = ["modifier-groups"] as const;
 
 async function listModifierGroups(): Promise<ModifierGroup[]> {
-  const res = await api.get<{ modifier_groups: ModifierGroup[]; total: number }>(
-    "/api/modifiers"
-  );
+  const res = await api.get<ListModifierGroupsResponse>("/api/modifiers");
   return res.modifier_groups ?? [];
+}
+
+/** Side-channel: read the raw payload (including `partial` flag). */
+export async function listModifierGroupsRaw(): Promise<ListModifierGroupsResponse> {
+  return api.get<ListModifierGroupsResponse>("/api/modifiers");
 }
 
 async function verifyModifier(input: VerifyModifierInput): Promise<{ ok: true }> {

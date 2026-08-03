@@ -20,6 +20,10 @@ from app.schemas.category import (
 from app.schemas.item import (
     CreateItemRequest,
     CreateItemResponse,
+    UpdateAvailabilityRequest,
+    UpdateAvailabilityResponse,
+    UpdateItemRequest,
+    UpdateItemResponse,
     UploadImageResponse,
 )
 from app.schemas.menu import MenuResponse
@@ -61,6 +65,10 @@ __all__ = [
     # item
     "CreateItemRequest",
     "CreateItemResponse",
+    "UpdateAvailabilityRequest",
+    "UpdateAvailabilityResponse",
+    "UpdateItemRequest",
+    "UpdateItemResponse",
     "UploadImageResponse",
     # modifier
     "CreateModifierGroupRequest",

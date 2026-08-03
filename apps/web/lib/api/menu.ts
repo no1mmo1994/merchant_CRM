@@ -48,6 +48,33 @@ export interface CreateItemResult {
   item_name: string;
 }
 
+export interface UpdateItemInput {
+  name?: string;
+  description?: string;
+  name_en?: string;
+  description_en?: string;
+  price_vnd?: number;
+  category_id?: string;
+  image_urls?: string[];
+  linked_modifier_group_ids?: string[];
+  selling_time_id?: string;
+}
+
+export interface UpdateItemResult {
+  item_id: string;
+  item_name: string;
+  available?: boolean | null;
+}
+
+export interface UpdateAvailabilityInput {
+  available: boolean;
+}
+
+export interface UpdateAvailabilityResult {
+  item_id: string;
+  available: boolean;
+}
+
 export interface UploadImageResult {
   url: string;
 }
@@ -73,6 +100,20 @@ async function sortCategories(input: SortCategoryInput): Promise<{ success: bool
 
 async function createItem(input: CreateItemInput): Promise<CreateItemResult> {
   return api.post<CreateItemResult>("/api/items", input);
+}
+
+async function updateItem(itemId: string, input: UpdateItemInput): Promise<UpdateItemResult> {
+  return api.put<UpdateItemResult>(`/api/items/${encodeURIComponent(itemId)}`, input);
+}
+
+async function updateItemAvailability(
+  itemId: string,
+  input: UpdateAvailabilityInput,
+): Promise<UpdateAvailabilityResult> {
+  return api.patch<UpdateAvailabilityResult>(
+    `/api/items/${encodeURIComponent(itemId)}/availability`,
+    input,
+  );
 }
 
 /**
@@ -164,6 +205,59 @@ export function useCreateItem() {
     mutationFn: createItem,
     onSuccess: () => qc.invalidateQueries({ queryKey: MENU_KEY }),
   });
+}
+
+export function useUpdateItem() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ itemId, input }: { itemId: string; input: UpdateItemInput }) =>
+      updateItem(itemId, input),
+    onSuccess: () => qc.invalidateQueries({ queryKey: MENU_KEY }),
+  });
+}
+
+export function useUpdateItemAvailability() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ itemId, input }: { itemId: string; input: UpdateAvailabilityInput }) =>
+      updateItemAvailability(itemId, input),
+    // Optimistic toggle so the Switch feels instant. On error we roll back
+    // and let the consumer show the toast.
+    onMutate: async ({ itemId, input }) => {
+      await qc.cancelQueries({ queryKey: MENU_KEY });
+      const prev = qc.getQueryData<MenuPayload>(MENU_KEY);
+      if (prev && typeof prev === "object") {
+        qc.setQueryData<MenuPayload>(MENU_KEY, toggleAvailability(prev, itemId, input.available));
+      }
+      return { prev };
+    },
+    onError: (_err, _vars, ctx) => {
+      if (ctx?.prev) qc.setQueryData(MENU_KEY, ctx.prev);
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: MENU_KEY }),
+  });
+}
+
+/** Walk the cached menu and flip `availableStatus` on the matching item. */
+function toggleAvailability(menu: MenuPayload, itemId: string, available: boolean): MenuPayload {
+  const categories = (menu as { categories?: unknown }).categories;
+  if (!Array.isArray(categories)) return menu;
+  const next = categories.map((cat) => {
+    if (!cat || typeof cat !== "object") return cat;
+    const items = (cat as { items?: unknown }).items;
+    if (!Array.isArray(items)) return cat;
+    return {
+      ...(cat as Record<string, unknown>),
+      items: items.map((it) => {
+        if (!it || typeof it !== "object") return it;
+        const rec = it as Record<string, unknown>;
+        const id = rec.itemID ?? rec.skuID ?? rec.id;
+        if (String(id ?? "") !== itemId) return it;
+        return { ...rec, availableStatus: available ? "AVAILABLE" : "OUT_OF_STOCK" };
+      }),
+    };
+  });
+  return { ...(menu as Record<string, unknown>), categories: next };
 }
 
 export function useUploadItemImage() {

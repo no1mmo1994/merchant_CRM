@@ -60,11 +60,18 @@ async def create_or_update_item(
     linked_modifier_group_ids: list[str] | None = None,
     selling_time_id: str = "AlwaysAvailable",
     item_id: str | None = None,
+    eligible_selling_status: str = "",
 ) -> dict:
     """POST /food/merchant/v2/upsert-item — create or update a menu item.
 
     Granular keyword-only arguments keep call sites readable from the
     FastAPI layer. The full payload shape mirrors the original `taomon.py`.
+
+    `eligible_selling_status` controls whether the item is sellable on
+    the storefront. Grab accepts an empty string (default = unchanged)
+    or one of `"AVAILABLE"` / `"OUT_OF_STOCK"`. When updating only
+    availability, callers should pass the existing item fields back in
+    alongside the new status.
     """
     payload = {
         "item": {
@@ -85,7 +92,7 @@ async def create_or_update_item(
             "priceInMin": int(price_vnd),
             "imageURLs": image_urls or [],
             "sellingTimeID": selling_time_id,
-            "eligibleSellingStatus": "",
+            "eligibleSellingStatus": eligible_selling_status,
             "skuID": item_id or "",
         },
         "itemAttributeValues": [],
@@ -94,3 +101,74 @@ async def create_or_update_item(
     res = await client.post("/food/merchant/v2/upsert-item", json=payload)
     res.raise_for_status()
     return res.json()
+
+
+async def set_item_availability(
+    client: GrabClient,
+    *,
+    item_id: str,
+    available: bool,
+) -> dict:
+    """Toggle the storefront availability of an existing menu item.
+
+    Grab's upsert-item endpoint requires the full item payload, so we
+    have to fetch the existing item first via /menu, mutate only the
+    availability flag, and write it back. This keeps name/price/desc
+    unchanged while flipping `eligibleSellingStatus`.
+
+    On a 5xx from Grab, raises the underlying httpx error.
+    """
+    if not item_id:
+        raise ValueError("item_id is required to toggle availability")
+
+    from grab.endpoints.menu import get_full_menu
+
+    menu = await get_full_menu(client)
+    if not isinstance(menu, dict):
+        raise ValueError("menu payload from Grab was not a dict")
+
+    target: dict | None = None
+    for cat in menu.get("categories") or []:
+        for item in (cat or {}).get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("itemID") or item.get("skuID") or "") == item_id:
+                target = item
+                break
+        if target is not None:
+            break
+
+    if target is None:
+        raise ValueError(f"item {item_id} not found in current menu")
+
+    name_vi = str(target.get("itemName") or target.get("name") or "")
+    name_en = (
+        ((target.get("nameTranslation") or {}).get("translation") or {}).get("en")
+        or name_vi
+    )
+    description_vi = str(target.get("description") or "")
+    description_en = (
+        ((target.get("descriptionTranslation") or {}).get("translation") or {})
+        .get("en")
+        or description_vi
+    )
+    price_vnd = int(target.get("priceInMin") or target.get("price") or 0)
+    image_urls = list(target.get("imageURLs") or [])
+    linked_modifier_group_ids = list(target.get("linkedModifierGroupIDs") or [])
+    selling_time_id = str(target.get("sellingTimeID") or "AlwaysAvailable")
+    category_id = str(target.get("categoryID") or "")
+
+    return await create_or_update_item(
+        client,
+        name_vi=name_vi,
+        name_en=name_en,
+        description_vi=description_vi,
+        description_en=description_en,
+        price_vnd=price_vnd,
+        category_id=category_id,
+        image_urls=image_urls,
+        linked_modifier_group_ids=linked_modifier_group_ids,
+        selling_time_id=selling_time_id,
+        item_id=item_id,
+        eligible_selling_status="AVAILABLE" if available else "OUT_OF_STOCK",
+    )

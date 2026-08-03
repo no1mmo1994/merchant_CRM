@@ -1,4 +1,4 @@
-"""Menu item router — upload image, create item."""
+"""Menu item router — upload image, create, update, toggle availability."""
 
 from __future__ import annotations
 
@@ -9,12 +9,20 @@ import tempfile
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Path, UploadFile
 
 from app.deps import get_grab_client, get_session, require_user
 from app.models import User
-from app.schemas import CreateItemRequest, CreateItemResponse, UploadImageResponse
-from grab.endpoints.items import create_or_update_item, upload_image
+from app.schemas import (
+    CreateItemRequest,
+    CreateItemResponse,
+    UpdateAvailabilityRequest,
+    UpdateAvailabilityResponse,
+    UpdateItemRequest,
+    UpdateItemResponse,
+    UploadImageResponse,
+)
+from grab.endpoints.items import create_or_update_item, set_item_availability, upload_image
 
 log = logging.getLogger("pulseorder.items")
 
@@ -178,3 +186,224 @@ async def create_item(
     )
 
     return CreateItemResponse(item_id=item_id, item_name=body.name)
+
+
+async def _load_item(item_id: str, client) -> dict:
+    """Fetch an item from Grab's /menu payload, raising 404 if missing.
+
+    Used by the update + availability endpoints so they can preserve all the
+    fields they don't intend to change (Grab's upsert-item is full-payload).
+    """
+    from grab.endpoints.menu import get_full_menu
+
+    menu = await get_full_menu(client)
+    if not isinstance(menu, dict):
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "menu_unavailable",
+                "message": "Không đọc được thực đơn từ Grab để cập nhật món.",
+            },
+        )
+    for cat in menu.get("categories") or []:
+        for item in (cat or {}).get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("itemID") or item.get("skuID") or "") == item_id:
+                return item
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "code": "item_not_found",
+            "message": f"Không tìm thấy món {item_id} trong thực đơn hiện tại.",
+        },
+    )
+
+
+def _extract_item_locales(item: dict) -> dict[str, Any]:
+    """Pull the VI/EN name + description, price, images, etc. from a menu item."""
+    name_vi = str(item.get("itemName") or item.get("name") or "")
+    name_en = (
+        ((item.get("nameTranslation") or {}).get("translation") or {}).get("en")
+        or name_vi
+    )
+    description_vi = str(item.get("description") or "")
+    description_en = (
+        ((item.get("descriptionTranslation") or {}).get("translation") or {})
+        .get("en")
+        or description_vi
+    )
+    return {
+        "name_vi": name_vi,
+        "name_en": name_en,
+        "description_vi": description_vi,
+        "description_en": description_en,
+        "price_vnd": int(item.get("priceInMin") or item.get("price") or 0),
+        "category_id": str(item.get("categoryID") or ""),
+        "image_urls": list(item.get("imageURLs") or []),
+        "linked_modifier_group_ids": list(item.get("linkedModifierGroupIDs") or []),
+        "selling_time_id": str(item.get("sellingTimeID") or "AlwaysAvailable"),
+        # Preserve current availability so an edit doesn't silently re-enable
+        # items that the merchant had marked OUT_OF_STOCK. Grab's upsert-item
+        # treats the full payload as authoritative, so omission/empty here
+        # would let the upstream default re-enable the item.
+        "eligible_selling_status": str(item.get("eligibleSellingStatus") or ""),
+    }
+
+
+@router.put("/{item_id}", response_model=UpdateItemResponse)
+async def update_item(
+    body: UpdateItemRequest,
+    item_id: str = Path(..., min_length=1),
+    user: User = Depends(require_user),
+    client=Depends(get_grab_client),
+    session=Depends(get_session),
+) -> UpdateItemResponse:
+    """Update an existing menu item's editable fields.
+
+    Only fields the caller sends are mutated; everything else is preserved
+    from the current upstream snapshot. Empty strings for name are treated as
+    "don't change" to avoid wiping out an existing name through a stale form.
+    """
+    from app.deps import write_audit_log
+
+    current = await _load_item(item_id, client)
+    locales = _extract_item_locales(current)
+
+    # Apply patches. None means "leave alone"; "" for name is ignored too
+    # because Grab treats empty strings as clearing the field.
+    if body.name is not None and body.name.strip():
+        locales["name_vi"] = body.name.strip()
+    if body.description is not None:
+        locales["description_vi"] = body.description
+    if body.name_en is not None:
+        locales["name_en"] = body.name_en
+    if body.description_en is not None:
+        locales["description_en"] = body.description_en
+    if body.price_vnd is not None:
+        locales["price_vnd"] = body.price_vnd
+    if body.category_id is not None:
+        locales["category_id"] = body.category_id
+    if body.image_urls is not None:
+        locales["image_urls"] = body.image_urls
+    if body.linked_modifier_group_ids is not None:
+        locales["linked_modifier_group_ids"] = body.linked_modifier_group_ids
+    if body.selling_time_id is not None:
+        locales["selling_time_id"] = body.selling_time_id
+
+    try:
+        result = await create_or_update_item(
+            client,
+            name_vi=locales["name_vi"],
+            name_en=locales["name_en"],
+            description_vi=locales["description_vi"],
+            description_en=locales["description_en"],
+            price_vnd=locales["price_vnd"],
+            category_id=locales["category_id"],
+            image_urls=locales["image_urls"],
+            linked_modifier_group_ids=locales["linked_modifier_group_ids"],
+            selling_time_id=locales["selling_time_id"],
+            item_id=item_id,
+            eligible_selling_status=locales["eligible_selling_status"],
+        )
+    except httpx.HTTPStatusError as exc:
+        log.warning("Grab upsert-item rejected for %s: %s", item_id, exc)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "grab_rejected_update",
+                "grab_status": exc.response.status_code,
+                "message": "Grab từ chối cập nhật món. Vui lòng thử lại.",
+                "grab_body": exc.response.text[:500],
+            },
+        ) from exc
+    except httpx.HTTPError as exc:
+        log.warning("Grab upsert-item transport error for %s: %r", item_id, exc)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "grab_unreachable",
+                "message": "Không kết nối được tới Grab. Thử lại sau.",
+            },
+        ) from exc
+
+    write_audit_log(
+        session=session,
+        user_id=user.id,
+        action="item.update",
+        entity_type="item",
+        entity_id=item_id,
+        payload={
+            "fields_changed": [
+                k for k in (
+                    "name", "description", "price_vnd", "category_id",
+                    "image_urls", "linked_modifier_group_ids", "selling_time_id",
+                )
+                if getattr(body, k) is not None
+            ]
+        },
+    )
+
+    return UpdateItemResponse(
+        item_id=item_id,
+        item_name=locales["name_vi"],
+        available=None,
+    )
+
+
+@router.patch("/{item_id}/availability", response_model=UpdateAvailabilityResponse)
+async def update_item_availability(
+    body: UpdateAvailabilityRequest,
+    item_id: str = Path(..., min_length=1),
+    user: User = Depends(require_user),
+    client=Depends(get_grab_client),
+    session=Depends(get_session),
+) -> UpdateAvailabilityResponse:
+    """Toggle storefront availability for a single item."""
+    from app.deps import write_audit_log
+
+    try:
+        await set_item_availability(client, item_id=item_id, available=body.available)
+    except ValueError as exc:
+        # Item missing or menu payload malformed — surface as 404/502.
+        msg = str(exc)
+        if "not found" in msg.lower():
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "item_not_found", "message": msg},
+            ) from exc
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "menu_unavailable", "message": msg},
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        log.warning("Grab availability toggle rejected for %s: %s", item_id, exc)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "grab_rejected_availability",
+                "grab_status": exc.response.status_code,
+                "message": "Grab từ chối đổi trạng thái bán. Vui lòng thử lại.",
+                "grab_body": exc.response.text[:500],
+            },
+        ) from exc
+    except httpx.HTTPError as exc:
+        log.warning("Grab availability toggle transport error for %s: %r", item_id, exc)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "grab_unreachable",
+                "message": "Không kết nối được tới Grab. Thử lại sau.",
+            },
+        ) from exc
+
+    write_audit_log(
+        session=session,
+        user_id=user.id,
+        action="item.availability",
+        entity_type="item",
+        entity_id=item_id,
+        payload={"available": body.available},
+    )
+
+    return UpdateAvailabilityResponse(item_id=item_id, available=body.available)

@@ -3,11 +3,19 @@
 import * as React from "react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ChevronDown, ChevronRight, GripVertical, ImageIcon, ListChecks, Pencil, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, GripVertical, ImageIcon, ListChecks, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { useCreateItem, useDeleteCategory, useUploadItemImage } from "@/lib/api/menu";
+import { Switch } from "@/components/ui/switch";
+import {
+  useCreateItem,
+  useDeleteCategory,
+  useUpdateItemAvailability,
+  useUploadItemImage,
+} from "@/lib/api/menu";
+import { ApiError } from "@/lib/api";
+import { EditItemDialog } from "@/components/menu/EditItemDialog";
 import { toast } from "sonner";
 
 /** A modifier group attached to a menu item (e.g. "Topping"). */
@@ -221,115 +229,171 @@ export function CategoryCard({ category, onDelete }: CategoryCardProps) {
       {expanded && hasItems && (
         <div className="border-t border-(--color-border)">
           {category.items!.map((item) => (
-            <div
-              key={item.id}
-              className="border-b border-(--color-border) px-3 py-2 last:border-b-0 hover:bg-(--color-surface-2)"
-            >
-              <div className="flex items-center gap-3">
-                {/* Item image */}
-                <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded-md bg-(--color-surface-2)">
-                  {item.imageUrl ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={item.imageUrl}
-                      alt={item.name}
-                      className="h-full w-full object-cover"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).style.display = "none";
-                        (e.target as HTMLImageElement).nextElementSibling?.classList.remove("hidden");
-                      }}
-                    />
-                  ) : null}
-                  <div className={`flex h-full w-full items-center justify-center ${item.imageUrl ? "hidden" : ""}`}>
-                    <ImageIcon className="h-5 w-5 text-(--color-muted-foreground)" />
-                  </div>
-                </div>
+            <ItemRow key={item.id} item={item} categoryId={category.id} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
-                {/* Item info */}
+/**
+ * Single menu-item row: thumbnail + name + price + availability Switch +
+ * edit button (opens a dialog). Description is rendered below the row
+ * (no truncation) so it acts like a sub-label, matching the merchant
+ * dashboard layout.
+ */
+interface ItemRowProps {
+  item: MenuItemData;
+  categoryId: string;
+}
+
+function ItemRow({ item, categoryId }: ItemRowProps) {
+  const updateAvailability = useUpdateItemAvailability();
+
+  // Single source of truth for the Switch: derive from the cached query
+  // (which itself has been optimistically mutated by `useUpdateItemAvailability`).
+  // This avoids the dual-layer state where local + cache could disagree on
+  // rollback. The cache's `onError` rolls back; on success the server
+  // snapshot takes over.
+  const available = item.available ?? true;
+
+  async function handleToggle(next: boolean) {
+    try {
+      await updateAvailability.mutateAsync({
+        itemId: item.id,
+        input: { available: next },
+      });
+    } catch (err) {
+      const msg = err instanceof ApiError
+        ? err.message
+        : err instanceof Error
+        ? err.message
+        : "Đổi trạng thái món thất bại";
+      toast.error(msg);
+    }
+  }
+
+  return (
+    <div className="border-b border-(--color-border) px-3 py-2.5 last:border-b-0 hover:bg-(--color-surface-2)">
+      <div className="flex items-center gap-3">
+        {/* Item image */}
+        <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded-md bg-(--color-surface-2)">
+          {item.imageUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={item.imageUrl}
+              alt={item.name}
+              className="h-full w-full object-cover"
+              onError={(e) => {
+                (e.target as HTMLImageElement).style.display = "none";
+                (e.target as HTMLImageElement).nextElementSibling?.classList.remove("hidden");
+              }}
+            />
+          ) : null}
+          <div className={`flex h-full w-full items-center justify-center ${item.imageUrl ? "hidden" : ""}`}>
+            <ImageIcon className="h-5 w-5 text-(--color-muted-foreground)" />
+          </div>
+        </div>
+
+        {/* Item info — name + price (price still on the right column for alignment) */}
+        <div className="min-w-0 flex-1">
+          <div
+            className={`truncate text-sm font-medium ${
+              available ? "text-(--color-foreground)" : "text-(--color-muted-foreground)"
+            }`}
+          >
+            {item.name}
+          </div>
+        </div>
+
+        {/* Price */}
+        <div className="flex-shrink-0 text-right">
+          {item.price !== undefined ? (
+            <span className="text-sm font-semibold text-(--color-brand)">
+              {formatVND(item.price)}
+            </span>
+          ) : (
+            <span className="text-xs text-(--color-muted-foreground)">Chưa đặt giá</span>
+          )}
+        </div>
+
+        {/* Availability Switch */}
+        <div className="flex-shrink-0">
+          <Switch
+            checked={available}
+            onCheckedChange={handleToggle}
+            aria-label={`Bật/tắt ${item.name}`}
+          />
+        </div>
+
+        {/* Edit button */}
+        <EditItemDialog item={item} categoryId={categoryId} />
+      </div>
+
+      {/* Description shown verbatim below the row (no truncation) */}
+      {item.description && item.description.trim() && (
+        <p
+          className={`mt-1.5 break-words text-xs leading-relaxed ${
+            available ? "text-(--color-muted-foreground)" : "text-(--color-muted-foreground)/60"
+          }`}
+        >
+          {item.description}
+        </p>
+      )}
+
+      {/* Modifier groups attached to this item */}
+      {item.modifierGroups && item.modifierGroups.length > 0 && (
+        <div className="mt-2 ml-[3.75rem] space-y-1.5">
+          {item.modifierGroups.map((mg) => {
+            const range =
+              mg.selection_range_min === mg.selection_range_max
+                ? `Chọn ${mg.selection_range_max}`
+                : `Chọn ${mg.selection_range_min}–${mg.selection_range_max}`;
+            return (
+              <div
+                key={mg.modifier_group_id || mg.modifier_group_name}
+                className="flex items-start gap-2 rounded-md bg-(--color-surface-2)/50 px-2 py-1.5 text-xs"
+              >
+                <ListChecks className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-(--color-brand)" />
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium text-(--color-foreground)">
-                    {item.name}
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-medium text-(--color-foreground)">
+                      {mg.modifier_group_name}
+                    </span>
+                    <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                      {range}
+                    </Badge>
+                    <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+                      {mg.modifiers.length} món
+                    </Badge>
                   </div>
-                  {item.description && (
-                    <div className="truncate text-xs text-(--color-muted-foreground)">
-                      {item.description}
+                  {mg.modifiers.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {mg.modifiers.slice(0, 5).map((m) => (
+                        <span
+                          key={m.modifier_id || m.modifier_name}
+                          className="inline-flex items-center gap-1 rounded bg-(--color-surface) px-1.5 py-0.5 text-[10px] text-(--color-muted-foreground)"
+                        >
+                          {m.modifier_name}
+                          {m.price_vnd > 0 ? (
+                            <span className="text-(--color-brand)">
+                              +{m.price_vnd.toLocaleString("vi-VN")}đ
+                            </span>
+                          ) : null}
+                        </span>
+                      ))}
+                      {mg.modifiers.length > 5 && (
+                        <span className="text-[10px] text-(--color-muted-foreground)">
+                          +{mg.modifiers.length - 5} khác
+                        </span>
+                      )}
                     </div>
                   )}
                 </div>
-
-                {/* Price */}
-                <div className="flex-shrink-0 text-right">
-                  {item.price !== undefined ? (
-                    <span className="text-sm font-semibold text-(--color-brand)">
-                      {formatVND(item.price)}
-                    </span>
-                  ) : (
-                    <span className="text-xs text-(--color-muted-foreground)">Chưa đặt giá</span>
-                  )}
-                </div>
-
-                {/* Edit button */}
-                <Button variant="ghost" size="icon" className="h-7 w-7 flex-shrink-0">
-                  <Pencil className="h-3.5 w-3.5" />
-                </Button>
               </div>
-
-              {/* Modifier groups attached to this item */}
-              {item.modifierGroups && item.modifierGroups.length > 0 && (
-                <div className="mt-2 ml-15 space-y-1.5">
-                  {item.modifierGroups.map((mg) => {
-                    const range =
-                      mg.selection_range_min === mg.selection_range_max
-                        ? `Chọn ${mg.selection_range_max}`
-                        : `Chọn ${mg.selection_range_min}–${mg.selection_range_max}`;
-                    return (
-                      <div
-                        key={mg.modifier_group_id || mg.modifier_group_name}
-                        className="flex items-start gap-2 rounded-md bg-(--color-surface-2)/50 px-2 py-1.5 text-xs"
-                      >
-                        <ListChecks className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-(--color-brand)" />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="font-medium text-(--color-foreground)">
-                              {mg.modifier_group_name}
-                            </span>
-                            <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
-                              {range}
-                            </Badge>
-                            <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
-                              {mg.modifiers.length} món
-                            </Badge>
-                          </div>
-                          {mg.modifiers.length > 0 && (
-                            <div className="mt-1 flex flex-wrap gap-1">
-                              {mg.modifiers.slice(0, 5).map((m) => (
-                                <span
-                                  key={m.modifier_id || m.modifier_name}
-                                  className="inline-flex items-center gap-1 rounded bg-(--color-surface) px-1.5 py-0.5 text-[10px] text-(--color-muted-foreground)"
-                                >
-                                  {m.modifier_name}
-                                  {m.price_vnd > 0 ? (
-                                    <span className="text-(--color-brand)">
-                                      +{m.price_vnd.toLocaleString("vi-VN")}đ
-                                    </span>
-                                  ) : null}
-                                </span>
-                              ))}
-                              {mg.modifiers.length > 5 && (
-                                <span className="text-[10px] text-(--color-muted-foreground)">
-                                  +{mg.modifiers.length - 5} khác
-                                </span>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

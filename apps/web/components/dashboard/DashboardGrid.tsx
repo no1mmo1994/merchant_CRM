@@ -9,6 +9,7 @@ import { VisitorsChart } from "./VisitorsChart";
 import { OrdersTable } from "./OrdersTable";
 import { ScorecardCard } from "./ScorecardCard";
 import { StoreStatusCard } from "./StoreStatusCard";
+import { StoreHoursCard } from "./StoreHoursCard";
 import { EmptyState } from "@/components/feedback/EmptyState";
 import { Card, CardContent } from "@/components/ui/card";
 import { staggerContainer } from "@/lib/animations/variants";
@@ -64,7 +65,16 @@ export function DashboardGrid() {
       className="grid grid-cols-12 gap-6"
     >
       <ScorecardCard />
+      {/* Realtime runtime state (Open / BusyMode / Paused) + the
+          "Đặt trạng thái quán" trigger — single-purpose panel. */}
       <StoreStatusCard />
+      {/* 7-day operating-hours table — mirrors `cuahang/trangthai.py`.
+          Pairs with StoreStatusCard above:
+            - StoreStatusCard: realtime runtime state (Open / Busy /
+              Paused) + the trigger button to change it
+            - StoreHoursCard:   the weekly schedule from
+              /food/merchant/v2/merchants (read-only) */}
+      {hasStore && <StoreHoursCard />}
 
       {!hasStore ? (
         <NoStoreBanner />

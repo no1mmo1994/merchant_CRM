@@ -27,13 +27,19 @@ interface GroupCardProps {
 }
 
 /**
- * Collapsible group card. Header shows the group name and how many
- * menu items reference it ("Liên kết với X món"). Click to expand
- * the list of modifier rows; each row has an availability toggle.
+ * Collapsible group card. Header shows the group name, the actual
+ * linked-item count (previously always 0 — now the backend walks the
+ * menu tree), and the categories this group is attached to
+ * (replaces the meaningless "Nguồn: menu_fallback" badge).
+ *
+ * Click to expand the list of modifier rows; each row has an
+ * availability toggle.
  */
 function GroupCard({ group }: GroupCardProps) {
   const [open, setOpen] = React.useState(false);
   const bodyId = React.useId();
+  const linkedCategories = group.linked_categories ?? [];
+  const showCategories = linkedCategories.length > 0;
   return (
     <div className="overflow-hidden rounded-lg border border-(--color-border) bg-(--color-surface-2)">
       <button
@@ -50,6 +56,26 @@ function GroupCard({ group }: GroupCardProps) {
           <div className="mt-0.5 text-xs text-(--color-muted-foreground)">
             Liên kết với {group.linked_item_count ?? 0} món
           </div>
+          {showCategories && (
+            <div
+              className="mt-1 flex flex-wrap gap-1 text-[11px] text-(--color-muted-foreground)"
+              title={linkedCategories
+                .map((c) => `${c.category_name || "(không tên)"} (${c.category_id}) · ${c.item_count} món`)
+                .join("\n")}
+            >
+              <span>Thuộc:</span>
+              {linkedCategories.map((c) => (
+                <span
+                  key={c.category_id || c.category_name}
+                  className="rounded bg-(--color-brand)/10 px-1.5 py-0.5 font-mono text-[10px] text-(--color-brand)"
+                >
+                  {c.category_name || "(không tên)"}
+                  {c.category_id ? ` · ${c.category_id}` : ""}
+                  {c.item_count > 0 ? ` · ${c.item_count} món` : ""}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
         <ChevronDown
           className={cn(
@@ -198,11 +224,11 @@ export function ModifiersClient() {
                 ))}
               </div>
             )}
-            {!isLoading && source && source !== "direct" && (
-              <p className="pt-1 text-[10px] text-(--color-muted-foreground)/60">
-                Nguồn: {source}
-              </p>
-            )}
+            {/* The previous "Nguồn: menu_fallback" tag was redundant with the
+                amber partial banner above and didn't tell the merchant
+                anything actionable. Category info now lives on each group
+                card ("Thuộc: <CategoryName> (<CategoryID>)"), so we
+                don't need a separate source line here. */}
           </CardContent>
         </Card>
       </div>

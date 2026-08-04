@@ -48,6 +48,22 @@ class ModifierOption(BaseModel):
     max_modifier_selection_quantity: int | None = None
 
 
+class ModifierGroupCategoryLink(BaseModel):
+    """A category that a modifier group is attached to.
+
+    `item_count` is how many items in that category reference the group
+    (one group can be reused across categories — `linked_item_count` on
+    `ModifierGroup` is the sum across all categories). Both fields are
+    optional / empty when the menu tree wasn't available at parse time
+    (which only happens on the direct endpoint when we skip the menu
+    fetch — see the router for when this fires).
+    """
+
+    category_id: str = ""
+    category_name: str = ""
+    item_count: int = 0
+
+
 class ModifierGroup(BaseModel):
     """A group of related modifier options (e.g. 'Topping', 'Size').
 
@@ -57,8 +73,11 @@ class ModifierGroup(BaseModel):
 
     `linked_item_count` is computed by walking the menu's category tree
     and counting how many items reference this group (so the UI can
-    render "Liên kết với X món"). It is 0 when we have no menu data
-    to walk (e.g. direct endpoint returned no embedded groups).
+    render "Liên kết với X món"). `linked_categories` carries the same
+    walk but per-category, so the UI can render "Thuộc: Phở (cat-001),
+    Bún (cat-002)" instead of the previous meaningless "Nguồn:
+    menu_fallback" badge when the modifier was discovered via the
+    `/menu` fallback path.
     """
 
     modifier_group_id: str = ""
@@ -67,6 +86,7 @@ class ModifierGroup(BaseModel):
     selection_range_max: int = 1
     modifiers: list[ModifierOption] = []
     linked_item_count: int = 0
+    linked_categories: list[ModifierGroupCategoryLink] = []
 
 
 class ListModifierGroupsResponse(BaseModel):

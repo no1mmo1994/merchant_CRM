@@ -1,44 +1,37 @@
 "use client";
 
 import * as React from "react";
-import { Activity, AlertCircle, Circle, Loader2 } from "lucide-react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Activity, AlertCircle, Coffee, PowerOff } from "lucide-react";
+import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useUIStore } from "@/lib/stores/ui-store";
 import { useAuthStore } from "@/lib/stores/auth-store";
-import { useStoreStatus, useStores } from "@/lib/api/stores";
-import {
-  type StoreConnectionStatus,
-  useStoreConnectionStatus,
-} from "@/hooks/useStoreConnectionStatus";
+import { useStoreOpeningHours, useStores } from "@/lib/api/stores";
 import { fadeUp } from "@/lib/animations/variants";
 import { motion } from "framer-motion";
-import Link from "next/link";
-
-const STATUS_VARIANTS: Record<string, "default" | "destructive" | "secondary" | "outline"> = {
-  ACTIVE: "default",
-  PENDING: "secondary",
-  SUSPENDED: "destructive",
-  INACTIVE: "secondary",
-};
-
-const STATUS_LABELS: Record<string, string> = {
-  ACTIVE: "Đang hoạt động",
-  PENDING: "Đang chờ duyệt",
-  SUSPENDED: "Bị đình chỉ",
-  INACTIVE: "Không hoạt động",
-};
+import { cn } from "@/lib/utils";
+import { StoreStatusDialog } from "@/components/stores/StoreStatusDialog";
 
 /**
- * Live store account status card — mirrors the
- * `trangchu/get_trangthai_hoatdong.py` logic.
+ * Live runtime status card.
  *
- * Three-state UI:
- *  - ACTIVE       → pulsing green dot, "Đang hoạt động"
- *  - PENDING/...  → coloured dot, mapped Vietnamese label
- *  - authtoken_error → amber alert, prominent "Lỗi AuthToken" banner
- *                     that links to Settings so the user can refresh.
+ * Mirrors `cuahang/trangthai2.py` via `GET /food/merchant/v3/open-status`
+ * and renders three things on a single row:
+ *
+ *   * A three-state pill (Open / BusyMode / Paused) — the same chip
+ *     the Grab merchant app shows on its home screen.
+ *   * A "Đặt trạng thái quán" trigger button (`StoreStatusDialog`),
+ *     inline with the pill so the merchant sees the current state and
+ *     the action button at a glance.
+ *   * A note bar under the row quoting Grab's verbatim
+ *     `status_content` plus a Vietnamese sentence describing the
+ *     runtime state (e.g. "Đang mở cửa · Đang mở cửa").
+ *
+ * The previous version of this card also rendered an account-level
+ * status section (ACTIVE / PENDING / SUSPENDED) with an auth-token
+ * banner; both have been removed at the operator's request so the
+ * "Trạng thái cửa hàng" card is now a single-purpose runtime panel.
  */
 export function StoreStatusCard() {
   const activeStoreId = useUIStore((s) => s.activeStoreId);
@@ -48,133 +41,155 @@ export function StoreStatusCard() {
   const activeStore = stores.find((s) => String(s.id) === activeStoreId) ?? stores[0];
   const merchantId = activeStore?.merchant_id ?? null;
 
-  const { data, isLoading, isError, error } = useStoreStatus(merchantId);
-  const { status } = useStoreConnectionStatus();
+  const { data: hours, isLoading: hoursLoading } =
+    useStoreOpeningHours(merchantId);
 
   return (
     <motion.div variants={fadeUp} className="lg:col-span-12">
       <Card className="border-(--color-border)">
         <CardHeader>
-          <div className="flex items-center gap-2">
-            <Activity className="h-4 w-4 text-(--color-brand)" />
-            <CardTitle>Trạng thái cửa hàng</CardTitle>
-          </div>
-          <CardDescription>
-            Trạng thái trực tiếp từ endpoint{" "}
-            <span className="font-mono">store-list</span> của Grab. Cập nhật tự động mỗi 30 giây.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {!merchantId && (
-            <div className="rounded-lg border border-dashed border-(--color-border) p-4 text-sm text-(--color-muted-foreground)">
-              Chưa có cửa hàng nào được kết nối. Vui lòng đăng nhập để bắt đầu.
-            </div>
-          )}
-
-          {merchantId && isLoading && (
-            <Skeleton className="h-14 w-full" />
-          )}
-
-          {/* Auth-token error takes precedence — it's the most useful
-              signal for the user even when the underlying data fetch
-              also fails. */}
-          {merchantId && status === "authtoken_error" && (
-            <AuthTokenErrorBlock error={error} />
-          )}
-
-          {merchantId && status !== "authtoken_error" && isError && (
-            <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3 text-sm text-red-500">
-              Không thể kết nối tới Grab ngay lúc này. Vui lòng thử lại sau ít phút.
-            </div>
-          )}
-
-          {data && !activeStore && (
-            <div className="text-sm text-(--color-muted-foreground)">
-              Chưa chọn cửa hàng.
-            </div>
-          )}
-
-          {data?.ok && status !== "authtoken_error" && (
-            <div className="flex flex-wrap items-center gap-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1.5">
               <div className="flex items-center gap-2">
-                {data.status === "ACTIVE" && (
-                  <span className="relative flex h-3 w-3">
-                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75" />
-                    <span className="relative inline-flex h-3 w-3 rounded-full bg-green-500" />
-                  </span>
-                )}
-                {data.status !== "ACTIVE" && (
-                  <Circle className="h-3 w-3 fill-current" />
-                )}
-                <Badge variant={STATUS_VARIANTS[data.status ?? "default"] ?? "secondary"}>
-                  {STATUS_LABELS[data.status ?? ""] ?? data.status ?? "—"}
-                </Badge>
+                <Activity className="h-4 w-4 text-(--color-brand)" />
+                <CardTitle>Trạng thái cửa hàng</CardTitle>
               </div>
-              {data.status_display && (
-                <span className="text-sm text-(--color-muted-foreground)">
-                  {data.status_display}
-                </span>
-              )}
-              {data.pending === true && (
-                <Badge variant="secondary" className="border-amber-500/50 text-amber-600 dark:text-amber-400">
-                  Đang chờ Grab duyệt
-                </Badge>
-              )}
-              {data.error && (
-                <span className="text-xs text-amber-500">
-                  Dữ liệu một phần: {data.error}
-                </span>
-              )}
+              <CardDescription>
+                Trạng thái runtime realtime (Mở cửa / Bận / Tạm nghỉ) từ
+                endpoint <span className="font-mono">v3/open-status</span>{" "}
+                của Grab. Cập nhật tự động mỗi 30 giây.
+              </CardDescription>
             </div>
-          )}
 
-          {data?.ok && !data.status && (
-            <div className="text-sm text-(--color-muted-foreground)">
-              Grab không trả về trạng thái cho cửa hàng này.
+            {/* Right-hand cluster — pill + action button share one row
+                so the operator sees the current state and the trigger
+                to change it at a glance. */}
+            {merchantId && (
+              <div className="flex flex-wrap items-center gap-2">
+                <RuntimePill
+                  label={hours?.data.status_label ?? null}
+                  isOpen={hours?.data.is_open ?? null}
+                  loading={hoursLoading}
+                />
+                <StoreStatusDialog
+                  merchantId={merchantId}
+                  trigger={
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1.5 rounded-md bg-(--color-brand) px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:bg-(--color-brand-hover)"
+                    >
+                      Đặt trạng thái quán
+                    </button>
+                  }
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Operator note — verbatim `status_content` from Grab plus a
+              Vietnamese sentence describing the runtime state. Sits
+              right under the pill so the merchant always sees what
+              state the store is in and when it resumes. */}
+          {merchantId && !hoursLoading && hours?.data.status_content && (
+            <div
+              className={cn(
+                "mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-xs",
+                hours.data.status_label === "Open" &&
+                  "border-emerald-500/30 bg-emerald-50/50 text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-200",
+                hours.data.status_label === "BusyMode" &&
+                  "border-amber-500/40 bg-amber-50/50 text-amber-800 dark:bg-amber-500/10 dark:text-amber-200",
+                hours.data.status_label === "Paused" &&
+                  "border-red-500/30 bg-red-50/50 text-red-700 dark:bg-red-500/10 dark:text-red-200",
+                !hours.data.status_label &&
+                  "border-(--color-border) text-(--color-muted-foreground)",
+              )}
+              title={hours.data.status_note ?? hours.data.status_content}
+            >
+              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="leading-relaxed">
+                <strong className="font-semibold">
+                  {runtimeNotePrefix(hours.data.status_label)}
+                </strong>
+                {hours.data.status_content
+                  ? ` · ${hours.data.status_content}`
+                  : ""}
+              </span>
             </div>
           )}
-        </CardContent>
+        </CardHeader>
       </Card>
     </motion.div>
   );
 }
 
-function AuthTokenErrorBlock({ error }: { error: unknown }) {
-  const errStatus =
-    error && typeof error === "object" && "status" in error
-      ? (error as { status?: number }).status
-      : undefined;
-  const isAuth = errStatus === 401 || errStatus === 403;
+function runtimeNotePrefix(
+  label: "Open" | "BusyMode" | "Paused" | null | undefined,
+): string {
+  switch (label) {
+    case "Open":
+      return "Đang mở cửa";
+    case "BusyMode":
+      return "Đang bận";
+    case "Paused":
+      return "Đang tạm nghỉ";
+    default:
+      return "Trạng thái";
+  }
+}
+
+interface RuntimePillProps {
+  label: "Open" | "BusyMode" | "Paused" | null | undefined;
+  isOpen: boolean | null | undefined;
+  loading: boolean;
+}
+
+/**
+ * Three-state runtime pill (mirrors `cuahang/trangthai2.py`):
+ *   Open      → green pulsing "ĐANG MỞ CỬA"
+ *   BusyMode  → amber "ĐANG BẬN"
+ *   Paused    → red "ĐANG TẠM NGHỈ / ĐÓNG CỬA"
+ *
+ * Falls back to the boolean `is_open` (from v2/merchants) when the
+ * v3 label is missing — better green-than-grey than nothing.
+ */
+function RuntimePill({ label, isOpen, loading }: RuntimePillProps) {
+  if (loading) {
+    return <Skeleton className="h-7 w-32" />;
+  }
+  if (label === "Open") return <OpenPill />;
+  if (label === "BusyMode") return <BusyPill />;
+  if (label === "Paused") return <ClosedPill />;
+  if (isOpen === true) return <OpenPill />;
+  if (isOpen === false) return <ClosedPill />;
+  return <Badge variant="secondary">—</Badge>;
+}
+
+function OpenPill() {
   return (
-    <div className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
-      <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
-      <div className="min-w-0 flex-1 space-y-2 text-sm">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="font-semibold text-amber-700 dark:text-amber-300">
-            Lỗi AuthToken
-          </span>
-          <Badge variant="outline" className="border-amber-500/50 text-amber-700 dark:text-amber-300">
-            Token hết hạn / không hợp lệ
-          </Badge>
-        </div>
-        <p className="text-amber-700/90 dark:text-amber-200/80">
-          {isAuth
-            ? "Grab từ chối xác thực do auth token đã hết hạn hoặc không hợp lệ."
-            : "Hệ thống không thể kết nối tới Grab sau nhiều lần thử. Token cục bộ có thể đã hết hạn."}
-          {" "}
-          Vui lòng làm mới token tại trang Cài đặt để tiếp tục sử dụng.
-        </p>
-        <div>
-          <Link
-            href="/settings"
-            className="inline-flex items-center gap-1 rounded-md border border-amber-500/50 bg-amber-500/20 px-3 py-1 text-xs font-medium text-amber-800 hover:bg-amber-500/30 dark:text-amber-200"
-          >
-            Đi tới Cài đặt để làm mới token
-          </Link>
-        </div>
-      </div>
-    </div>
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300">
+      <span className="relative flex h-2 w-2">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+      </span>
+      ĐANG MỞ CỬA
+    </span>
   );
 }
 
-export type { StoreConnectionStatus };
+function BusyPill() {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-800 dark:bg-amber-500/20 dark:text-amber-200">
+      <Coffee className="h-3.5 w-3.5" />
+      ĐANG BẬN
+    </span>
+  );
+}
+
+function ClosedPill() {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-700 dark:bg-red-500/20 dark:text-red-300">
+      <PowerOff className="h-3.5 w-3.5" />
+      ĐANG TẠM NGHỈ / ĐÓNG CỬA
+    </span>
+  );
+}

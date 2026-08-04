@@ -21,6 +21,7 @@ import { useAuthStore } from "@/lib/stores/auth-store";
 import { useStores, useStoreInfo, useRevealAuthnToken } from "@/lib/api/stores";
 import { useAuditLog, useDeleteStore, useRefreshToken } from "@/lib/api/settings";
 import { useUIStore } from "@/lib/stores/ui-store";
+import { StoreStatusDialog } from "@/components/stores/StoreStatusDialog";
 import { toast } from "sonner";
 
 export function SettingsClient() {
@@ -127,6 +128,35 @@ export function SettingsClient() {
               </Button>
             </div>
           </CardContent>
+        </Card>
+      )}
+
+      {/* Store status — Đặt trạng thái quán (BUSY + TEMPPAUSED) */}
+      {activeStore && (
+        <Card className="border-(--color-border)">
+          <CardHeader>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="space-y-1.5">
+                <CardTitle>Đặt trạng thái quán</CardTitle>
+                <CardDescription>
+                  Tạm nghỉ (TEMPPAUSED) theo khoảng thời gian, hoặc đặt chế độ
+                  bận (BUSY) với thời gian chuẩn bị cụ thể. Mở lại để trở về
+                  hoạt động bình thường.
+                </CardDescription>
+              </div>
+              <StoreStatusDialog
+                merchantId={activeStore.merchant_id}
+                trigger={
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1.5 rounded-md bg-(--color-brand) px-3 py-1.5 text-sm font-medium text-white shadow-sm transition hover:bg-(--color-brand-hover)"
+                  >
+                    Đặt trạng thái quán
+                  </button>
+                }
+              />
+            </div>
+          </CardHeader>
         </Card>
       )}
 

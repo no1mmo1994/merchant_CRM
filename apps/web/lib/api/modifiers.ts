@@ -31,6 +31,16 @@ export interface ModifierOption {
   max_modifier_selection_quantity?: number | null;
 }
 
+/** One category link for a modifier group. A group can be re-used
+ * across categories (e.g. "Topping" attached to every drink), so each
+ * link records `(category_id, category_name, item_count)` — the UI
+ * sums to render "Liên kết với N món" and lists each category. */
+export interface ModifierGroupCategoryLink {
+  category_id: string;
+  category_name: string;
+  item_count: number;
+}
+
 /** A group of related modifier options (e.g. "Topping", "Size"). */
 export interface ModifierGroup {
   modifier_group_id: string;
@@ -40,6 +50,9 @@ export interface ModifierGroup {
   modifiers: ModifierOption[];
   /** How many menu items currently reference this group ("Liên kết với X món"). */
   linked_item_count?: number;
+  /** Per-category breakdown — replaces the previous "Nguồn: menu_fallback"
+   *  badge with "Thuộc: <CategoryName> (<CategoryID>) · N món". */
+  linked_categories?: ModifierGroupCategoryLink[];
 }
 
 /**

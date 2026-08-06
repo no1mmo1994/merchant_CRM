@@ -11,7 +11,7 @@ from sqlmodel import Session, SQLModel, create_engine
 from grab.client import GrabClient
 
 from app.core.config import Settings
-from app.models import AuditLog, Store, User  # noqa: F401  (imports register tables)
+from app.models import AuditLog, OrderArchive, Store, User  # noqa: F401  (imports register tables)
 
 
 # ── Phase 02 fixtures ──────────────────────────────────────────────────────────

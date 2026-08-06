@@ -10,6 +10,7 @@ import {
   ListChecks,
   Settings,
   ShoppingBag,
+  Users,
 } from "lucide-react";
 import {
   Sidebar as SidebarPrimitive,
@@ -46,6 +47,7 @@ const NAV: NavItem[] = [
   { href: "/finance", label: "Tài chính", icon: DollarSign },
   // Stores page removed — login creates exactly one store per account.
   { href: "/analytics", label: "Phân tích", icon: BarChart3 },
+  { href: "/customers", label: "Khách hàng & Nguồn", icon: Users },
 ];
 
 const FOOTER: NavItem[] = [

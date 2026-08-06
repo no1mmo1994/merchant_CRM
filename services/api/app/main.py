@@ -25,6 +25,7 @@ Endpoints:
     POST /api/items       create menu item
     POST /api/modifiers/verify  verify modifier
     POST /api/modifiers/groups  create modifier group
+    GET  /api/finance/summary   Grab financial summary (date range)
     GET  /api/audit       paginated audit log
 """
 
@@ -50,9 +51,12 @@ from app.routers import (  # noqa: F401  (routers self-register)
     audit_router,
     auth_router,
     categories_router,
+    customers_router,
+    finance_router,
     items_router,
     menu_router,
     modifiers_router,
+    orders_router,
     stores_router,
 )
 
@@ -181,6 +185,9 @@ def create_app() -> FastAPI:
     app.include_router(categories_router)
     app.include_router(items_router)
     app.include_router(modifiers_router)
+    app.include_router(finance_router)
+    app.include_router(orders_router)
+    app.include_router(customers_router)
     app.include_router(audit_router)
 
     # ── Static endpoints ──────────────────────────────────────────────────────────

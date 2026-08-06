@@ -15,7 +15,7 @@ from sqlmodel import Session
 from app.core.config import Settings, settings
 from app.core.db import get_session as _get_session
 from app.core.security import COOKIE_NAME, SessionToken, clear_session_cookie
-from app.models import AuditLog, Store, User
+from app.models import AuditLog, OrderArchive, Store, User
 
 if TYPE_CHECKING:
     from grab import GrabClient

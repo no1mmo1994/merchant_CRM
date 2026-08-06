@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from sqlmodel import Session, SQLModel, create_engine
 
@@ -56,6 +58,34 @@ def get_session():
         session.close()
 
 
+@contextmanager
+def session_scope() -> Iterator["Session"]:
+    """Yield a fresh Session bound to the module-level engine; close on exit.
+
+    Use this in non-FastAPI callers — background jobs, APScheduler tasks,
+    one-shot CLI scripts. FastAPI request handlers MUST keep using
+    ``get_session`` (the generator above) because ``app/deps.py``
+    depends on it via ``yield from _get_session()``. Don't replace one
+    with the other: ``get_session`` is generator-shaped so FastAPI's
+    dependency-injection can drive its ``finally``; ``session_scope`` is
+    contextmanager-shaped so ``with`` blocks can drive theirs.
+
+    Why both exist: APScheduler job bodies used to call ``with
+    get_session() as session:``. ``get_session`` is a generator, not a
+    context manager, so the very first tick crashed with
+    ``TypeError: 'generator' object does not support the context manager
+    protocol``. That crash leaked into the shared async event loop and
+    manifested as intermittent 500s on the next HTTP request — including
+    the login form, which the operator saw as "Internal Server Error"
+    even though the login router itself was untouched.
+    """
+    session = Session(_engine)
+    try:
+        yield session
+    finally:
+        session.close()
+
+
 def init_db() -> None:
     """Create all tables and ensure the data directory exists.
 
@@ -72,15 +102,34 @@ def init_db() -> None:
         data_dir.mkdir(parents=True, exist_ok=True)
 
     # Import all models so SQLModel.metadata registers every table.
-    from app.models import AuditLog, Store, User  # noqa: F401
+    from app.models import AuditLog, OrderSnapshot, Store, User  # noqa: F401
 
-    # Skip if already initialised — avoids CREATE TABLE races under
-    # uvicorn --reload (parent reloader + child server both run lifespan).
-    from sqlmodel import inspect
-    if inspect(_engine).get_table_names():
-        return
-
-    SQLModel.metadata.create_all(_engine)
+    # Skip full re-create if already initialised — avoids CREATE TABLE
+    # races under uvicorn --reload (parent reloader + child server
+    # both run lifespan). We still need `create_all` to apply the
+    # delta when new tables (e.g. `order_snapshots`) were added by a
+    # later model file on an existing DB, so always run it — it's a
+    # no-op for tables that already exist.
+    from sqlmodel import inspect, SQLModel as _SQLModel
+    # Use SQLAlchemy's `inspect(...)` to enumerate what already exists,
+    # then only create the tables that are missing. SQLModel.metadata
+    # `.create_all(checkfirst=True)` does *not* reliably no-op when the
+    # metadata is collected across multiple model files in this
+    # SQLAlchemy version — it emits `CREATE TABLE` for already-existing
+    # tables and the SQLite engine raises `OperationalError: table
+    # ... already exists` on the first collision. Filtering the
+    # `tables=` argument avoids the race AND works under uvicorn
+    # --reload (parent reloader + child server both running lifespan).
+    existing = set(inspect(_engine).get_table_names())
+    missing_tables = [
+        tbl
+        for tbl in _SQLModel.metadata.sorted_tables
+        if tbl.name not in existing
+    ]
+    if missing_tables:
+        _SQLModel.metadata.create_all(
+            _engine, tables=missing_tables, checkfirst=True
+        )
 
 
 # Re-export engine for direct use in tests.

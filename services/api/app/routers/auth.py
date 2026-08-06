@@ -1,11 +1,20 @@
 """Authentication router — login, logout, me, refresh-token."""
 
-from __future__ import annotations
+# No `from __future__ import annotations` here on purpose: with PEP 563
+# string annotations, FastAPI's route-introspection wraps Pydantic
+# models as `Annotated[ForwardRef('LoginRequest'), Body(...)]` and
+# fails to resolve the forward ref, surfacing every POST as
+# `PydanticUserError: ... is not fully defined` → 500 "Internal Server
+# Error". Keeping the annotations as live objects (`Request`, `Body`,
+# `LoginRequest`, …) lets FastAPI build the route schema without
+# having to string-resolve anything. Other routers in this codebase
+# continue to use `from __future__ import annotations`; only this
+# file needed to drop it to fix the login 500.
 
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, status
 from sqlmodel import Session
 
 from app.core.config import settings
@@ -41,8 +50,8 @@ log = logging.getLogger("pulseorder.auth")
 @limiter.limit(f"{settings.rate_limit_per_minute}/minute")
 async def login(
     request: Request,
-    body: LoginRequest,
     response: Response,
+    payload: LoginRequest = Body(...),
     session: Session = Depends(get_session),
 ) -> LoginResponse:
     """Authenticate against Grab and create (or find) the associated PulseOrder user + store.
@@ -62,6 +71,13 @@ async def login(
       3. Encrypt tokens, upsert the User row, upsert the Store row keyed
          by (merchant_grab_id, owner_user_id).
       4. Set session + active-store cookies.
+
+    The ``= Body(...)`` default forces FastAPI's route-introspection to
+    bind ``LoginRequest`` as the JSON request body (not as a Query
+    param — which would 422 every dashboard POST with
+    ``loc: ["query", "payload"]``). Parameter is named ``payload``
+    (not ``body``) because FastAPI/Starlette reserves ``body`` and
+    binds it as a Query param regardless.
     """
     from grab import login_three_step
 
@@ -70,15 +86,15 @@ async def login(
     # so we never reuse a stored one. Same value drives step-1 and step-3
     # (matches `Login/login1-done.py:get_xray_token`).
     xray_provider = StaticXRayProvider(
-        step1_token=body.xray_token,
-        step3_token=body.xray_token,
+        step1_token=payload.xray_token,
+        step3_token=payload.xray_token,
     )
 
     # ── Run the 3-step Grab login ───────────────────────────────────────────────
     try:
         result = await login_three_step(
-            email=body.email,
-            password=body.password,
+            email=payload.email,
+            password=payload.password,
             xray=xray_provider,
             verify_ssl=settings.grab_verify_ssl,
         )
@@ -136,10 +152,10 @@ async def login(
     enc_xray = encrypt_token(xray_provider.step1_token)
 
     # ── Find or create the user ─────────────────────────────────────────────────
-    user: User = session.query(User).filter(User.username == body.email).first()
+    user: User = session.query(User).filter(User.username == payload.email).first()
     if user is None:
         user = User(
-            username=body.email,
+            username=payload.email,
             password_hash="",  # no local password in Phase 03
         )
         session.add(user)
@@ -222,7 +238,7 @@ def me(
 
 @router.post("/refresh-token")
 async def refresh_token(
-    body: RefreshTokenRequest,
+    payload: RefreshTokenRequest = Body(...),
     user: User = Depends(require_user),
     session: Session = Depends(get_session),
 ) -> dict[str, str]:
@@ -233,11 +249,15 @@ async def refresh_token(
     password on every challenge — there's no way to refresh server-side
     without re-prompting the user. We surface that as a structured 410
     so the frontend can show "please sign in again".
+
+    ``= Body(...)`` and the ``payload`` rename mirror the fix on
+    ``login`` — same body-binding requirement, same avoidance of the
+    reserved name ``body``.
     """
     store: Store | None = (
         session.query(Store)
         .filter(
-            Store.merchant_id == body.merchant_id,
+            Store.merchant_id == payload.merchant_id,
             Store.owner_user_id == user.id,
         )
         .first()

@@ -159,9 +159,35 @@ async def create_item(
     from app.deps import write_audit_log
     from grab.endpoints.categories import translate_name
 
-    # Auto-translate VI name + description -> EN
-    name_en = await translate_name(client, body.name)
-    desc_en = await translate_name(client, body.description) if body.description else ""
+    # Auto-translate VI name + description -> EN.
+    #
+    # Both branches pass `entity`/`text_type` explicitly. `translate_name`
+    # defaults to ``entity="category"`` + ``text_type="name"``, tuned for
+    # category creation: Grab's translation API rejects that pairing with
+    # a 4xx when applied to item descriptions, and the unhandled
+    # ``HTTPStatusError`` surfaces as a raw 500.
+    #
+    # The name branch used to ride those defaults, so an item's name was
+    # translated as though it were a category's. Grab accepted it, which
+    # is why nothing broke loudly — but it fed the translator the wrong
+    # context, and the description branch three lines down already showed
+    # what the right call looks like.
+    name_en = await translate_name(
+        client,
+        body.name,
+        entity="item",
+        text_type="name",
+    )
+    desc_en = (
+        await translate_name(
+            client,
+            body.description,
+            entity="item",
+            text_type="description",
+        )
+        if body.description
+        else ""
+    )
 
     result = await create_or_update_item(
         client,
@@ -190,13 +216,24 @@ async def create_item(
     return CreateItemResponse(item_id=item_id, item_name=body.name)
 
 
-async def _load_item(item_id: str, client) -> dict:
-    """Fetch an item from Grab's /menu payload, raising 404 if missing.
+async def _load_item(item_id: str, client) -> tuple[dict, str]:
+    """Fetch an item from Grab's /menu, plus the id of its category.
 
-    Used by the update + availability endpoints so they can preserve all the
-    fields they don't intend to change (Grab's upsert-item is full-payload).
+    Returns `(item, category_id)`, raising 404 if the item is missing.
+
+    Used by the update + availability endpoints so they can preserve all
+    the fields they don't intend to change (Grab's upsert-item is
+    full-payload). The category is returned alongside because it is one
+    of those fields, and reading it off the item itself is unreliable:
+    `/menu` items frequently carry no `categoryID`, so callers defaulted
+    it to `""` and then wrote that empty value back — moving the item out
+    of its category on Grab. The enclosing category is authoritative.
+
+    `find_item_with_category` also walks `sections[].categories[]`, the
+    shape a real store actually returns; the loop this replaced only
+    walked the flat `categories` list and so usually found nothing.
     """
-    from grab.endpoints.menu import get_full_menu
+    from grab.endpoints.menu import find_item_with_category, get_full_menu
 
     menu = await get_full_menu(client)
     if not isinstance(menu, dict):
@@ -207,12 +244,9 @@ async def _load_item(item_id: str, client) -> dict:
                 "message": "Không đọc được thực đơn từ Grab để cập nhật món.",
             },
         )
-    for cat in menu.get("categories") or []:
-        for item in (cat or {}).get("items") or []:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("itemID") or item.get("skuID") or "") == item_id:
-                return item
+    found = find_item_with_category(menu, item_id)
+    if found is not None:
+        return found
     raise HTTPException(
         status_code=404,
         detail={
@@ -222,8 +256,15 @@ async def _load_item(item_id: str, client) -> dict:
     )
 
 
-def _extract_item_locales(item: dict) -> dict[str, Any]:
-    """Pull the VI/EN name + description, price, images, etc. from a menu item."""
+def _extract_item_locales(item: dict, category_id: str = "") -> dict[str, Any]:
+    """Pull the VI/EN name + description, price, images, etc. from a menu item.
+
+    `category_id` is the id of the category the item was found inside
+    (see `_load_item`). It wins over the item's own `categoryID`, which
+    `/menu` often omits — falling back to `""` there meant upsert-item
+    was told the item belongs to no category, silently removing it from
+    the one it was in.
+    """
     name_vi = str(item.get("itemName") or item.get("name") or "")
     name_en = (
         ((item.get("nameTranslation") or {}).get("translation") or {}).get("en")
@@ -245,7 +286,7 @@ def _extract_item_locales(item: dict) -> dict[str, Any]:
         "description_vi": description_vi,
         "description_en": description_en,
         "price_vnd": int(item.get("priceInMin") or item.get("price") or 0),
-        "category_id": str(item.get("categoryID") or ""),
+        "category_id": category_id or str(item.get("categoryID") or ""),
         "image_urls": image_urls,
         "webp_urls": webp_urls,
         "webp_url": webp_url,
@@ -279,8 +320,8 @@ async def update_item(
     """
     from app.deps import write_audit_log
 
-    current = await _load_item(item_id, client)
-    locales = _extract_item_locales(current)
+    current, current_category_id = await _load_item(item_id, client)
+    locales = _extract_item_locales(current, current_category_id)
 
     # Apply patches. None means "leave alone"; "" for name is ignored too
     # because Grab treats empty strings as clearing the field.
@@ -431,7 +472,7 @@ async def update_item_availability(
             # v1 endpoint requires sellingTimeID for status=1; pull from
             # current menu snapshot.
             try:
-                current = await _load_item(item_id, client)
+                current, _ = await _load_item(item_id, client)
             except HTTPException:
                 raise
             selling_time_id = (

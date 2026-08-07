@@ -169,25 +169,20 @@ async def set_item_availability(
     if not item_id:
         raise ValueError("item_id is required to toggle availability")
 
-    from grab.endpoints.menu import get_full_menu
+    from grab.endpoints.menu import find_item_with_category, get_full_menu
 
     menu = await get_full_menu(client)
     if not isinstance(menu, dict):
         raise ValueError("menu payload from Grab was not a dict")
 
-    target: dict | None = None
-    for cat in menu.get("categories") or []:
-        for item in (cat or {}).get("items") or []:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("itemID") or item.get("skuID") or "") == item_id:
-                target = item
-                break
-        if target is not None:
-            break
-
-    if target is None:
+    # `find_item_with_category` walks both the flat `categories` list and
+    # the nested `sections[].categories` shape. The old loop here only
+    # walked the flat one, so on a real store — which uses the nested
+    # shape — it usually found nothing and raised "item not found".
+    found = find_item_with_category(menu, item_id)
+    if found is None:
         raise ValueError(f"item {item_id} not found in current menu")
+    target, found_category_id = found
 
     name_vi = str(target.get("itemName") or target.get("name") or "")
     name_en = (
@@ -206,7 +201,11 @@ async def set_item_availability(
     webp_url = str(target.get("webPURL") or (webp_urls[0] if webp_urls else ""))
     linked_modifier_group_ids = list(target.get("linkedModifierGroupIDs") or [])
     selling_time_id = str(target.get("sellingTimeID") or "AlwaysAvailable")
-    category_id = str(target.get("categoryID") or "")
+    # Take the category from the category we found the item INSIDE, not
+    # from the item's own `categoryID` — that field is often absent on
+    # `/menu` items, and defaulting it to "" wrote an empty category back
+    # through upsert-item, knocking the item out of its category on Grab.
+    category_id = found_category_id or str(target.get("categoryID") or "")
     sold_quantity = int(target.get("soldQuantity") or 0)
     sort_order = target.get("sortOrder")
     available_at = str(target.get("availableAt") or "0001-01-01T00:00:00.000Z")

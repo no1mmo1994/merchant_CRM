@@ -47,6 +47,13 @@ export interface FinancialSummaryResponse {
   currency: string;
   sales_balance: FinancialMetricValue | null;
   earnings_balance: FinancialMetricValue | null;
+  /**
+   * Count of orders archived locally in ``[start_date, end_date]``,
+   * scoped to the operator's owned store(s). Populated by the
+   * backend from ``OrderArchive.first_seen_at``. Surfaces as the
+   * "Tổng đơn" KPI on the dashboard overview.
+   */
+  total_orders: number;
   /** Recursive-walk output, ordered for stable rendering. */
   metrics: FinancialMetricGroup[];
   /** Raw `uiBreakdown` tree for drill-downs (omitted if empty). */

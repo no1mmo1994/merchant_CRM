@@ -1,48 +1,44 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { CreditCard, Database, LineChart as LineIcon, ShoppingBag, UserPlus, type LucideIcon } from "lucide-react";
-import { RevenueHero } from "./RevenueHero";
-import { StatCard } from "./StatCard";
+import { type LucideIcon } from "lucide-react";
 import { SalesPerformanceChart } from "./SalesPerformanceChart";
 import { VisitorsChart } from "./VisitorsChart";
 import { OrdersTable } from "./OrdersTable";
 import { ScorecardCard } from "./ScorecardCard";
 import { StoreStatusCard } from "./StoreStatusCard";
 import { StoreHoursCard } from "./StoreHoursCard";
+import { FinancialReportCard } from "./FinancialReportCard";
 import { EmptyState } from "@/components/feedback/EmptyState";
 import { Card, CardContent } from "@/components/ui/card";
 import { staggerContainer } from "@/lib/animations/variants";
 import { useUIStore } from "@/lib/stores/ui-store";
 import { useAuthStore } from "@/lib/stores/auth-store";
-import { useStoreInfo, useStores } from "@/lib/api/stores";
-import { useStoreConnectionStatus } from "@/hooks/useStoreConnectionStatus";
-import { formatNumber, formatVND } from "@/lib/data/placeholder-kpis";
+import { useStores } from "@/lib/api/stores";
 
 /**
- * Dashboard grid (Phase 06 + polish).
+ * Dashboard grid (Round 8 — financial report).
  *
- * Bug fix #6 (per user report): all v1 placeholder KPIs
- * (`placeholderKPIs`, `placeholderSalesPerformance`, `placeholderOrders`)
- * have been removed. We previously rendered hand-tuned fake numbers
- * ("Phở Bò Tái", "ORD-7821") even though the backend has no KPI
- * endpoint. That made it look like PulseOrder was computing real
- * metrics when it wasn't.
+ * The 4 placeholder `StatCard` tiles ("Doanh thu / Trung bình ngày /
+ * Khách hàng mới / Tổng đơn hàng" — all "—" with footer "Chưa có
+ * endpoint KPI từ backend") have been replaced by a single integrated
+ * ``FinancialReportCard`` that pulls the same ``/api/finance/summary``
+ * data the /finance page uses.
  *
- * New policy:
- *  - Show ONLY what we have API data for.
- *  - Scorecard + Status cards are real (they call Grab endpoints).
- *  - The "summary" rows (revenue, sales, daily average, new customers,
- *    total orders, total visitors, mobile/desktop share) are rendered
- *    as a single integrated `LiveMetricsStrip` that:
- *      - hides completely when no store is connected
- *      - shows real numbers when the backend exposes them
- *      - shows a clear "Chưa có dữ liệu" empty state otherwise
+ * Layout, top-to-bottom:
+ *   1. ScorecardCard        (real: today's scorecard)
+ *   2. StoreStatusCard      (real: realtime runtime state)
+ *   3. StoreHoursCard       (real: weekly schedule)
+ *   4. FinancialReportCard  (real: Tổng đơn / Doanh thu /
+ *      Chiết khấu / VAT / Số tiền thực nhận + breakdown %)
+ *   5. SalesPerformanceChart (placeholder shell — no daily series yet)
+ *   6. VisitorsChart        (placeholder shell — no visitor source yet)
+ *   7. OrdersTable          (real: latest archived orders)
  *
- * We still keep the previous card chips (RevenueHero, Sales chart,
- * Visitors chart, Orders table) as PLACEHOLDER shells so the layout
- * doesn't crash, but each one now shows `EmptyState` instead of fake
- * numbers — except where a real source exists.
+ * The chart shells stay because the operator already uses them as
+ * layout anchors — they render an honest empty state instead of fake
+ * numbers. Removing them entirely would shift the grid in ways that
+ * surprise the operator.
  */
 export function DashboardGrid() {
   const activeStoreId = useUIStore((s) => s.activeStoreId);
@@ -50,10 +46,6 @@ export function DashboardGrid() {
   const { data: storesData } = useStores();
   const stores = storesData ?? authStores;
   const activeStore = stores.find((s) => String(s.id) === activeStoreId) ?? stores[0];
-  const merchantId = activeStore?.merchant_id ?? null;
-
-  const { data: storeInfo, isLoading, isError } = useStoreInfo(merchantId);
-  const { status: connectionStatus } = useStoreConnectionStatus();
 
   const hasStore = !!activeStore;
 
@@ -80,13 +72,8 @@ export function DashboardGrid() {
         <NoStoreBanner />
       ) : (
         <>
-          <LiveMetricsStrip
-            merchantId={merchantId}
-            storeInfo={storeInfo}
-            isLoading={isLoading}
-            isError={isError}
-            connectionStatus={connectionStatus}
-          />
+          {/* Real financial report — replaces the four "—" tiles. */}
+          <FinancialReportCard />
 
           <SalesPerformanceChart />
           <VisitorsChart />
@@ -118,123 +105,7 @@ function NoStoreBanner() {
   );
 }
 
-interface LiveMetricsStripProps {
-  merchantId: string | null;
-  storeInfo: import("@/lib/api/stores").StoreInfoResponse | undefined;
-  isLoading: boolean;
-  isError: boolean;
-  connectionStatus: import("@/hooks/useStoreConnectionStatus").StoreConnectionStatus;
-}
-
-/**
- * 4-up row of summary tiles. We map the backend `store_info.data`
- * fields we already have:
- *  - name           → "Doanh thu" header (decorative)
- *  - email          → "Khách hàng mới" (decorative, since real
- *                     new-customer metric isn't in store_info yet)
- *
- * The four cards that previously rendered hard-coded numbers now
- * always show "—" (or hide themselves) until the backend exposes a
- * proper KPI endpoint. This is the honest version of the dashboard:
- * no more fake "Phở Bò Tái", "ORD-7821" rows.
- */
-function LiveMetricsStrip({
-  merchantId,
-  storeInfo,
-  isLoading,
-  isError,
-  connectionStatus,
-}: LiveMetricsStripProps) {
-  const rawStoreInfo = storeInfo?.store_info?.data;
-  const hasStoreInfo = !!rawStoreInfo && Object.values(rawStoreInfo).some(
-    (v) => v !== null && v !== "",
-  );
-  const isAuthDead =
-    isError || connectionStatus === "authtoken_error";
-
-  // If we don't have a real revenue / sales / customers KPI yet,
-  // render an informative empty state in place of the 4 cards. This
-  // replaces the previous "fake numbers" grid.
-  if (!merchantId) return null;
-
-  return (
-    <>
-      {/* Revenue hero — kept but only renders real values */}
-      <RevenueHero
-        revenue={null}
-        change={null}
-        isEmpty={isAuthDead || !hasStoreInfo}
-        loading={isLoading}
-        storeName={rawStoreInfo?.name ?? null}
-      />
-
-      {/* 4 stat tiles — each one tells the truth:
-          either we have a real KPI endpoint, or we show "—" with a
-          small hint. No more hard-coded VND figures. */}
-      <div className="lg:col-span-4">
-        <StatCard
-          title="Doanh thu"
-          value={isLoading ? "…" : "—"}
-          icon={<ShoppingBag className="h-4 w-4" />}
-          footer="Chưa có endpoint KPI từ backend"
-        />
-      </div>
-      <div className="lg:col-span-4">
-        <StatCard
-          title="Trung bình ngày"
-          value={isLoading ? "…" : "—"}
-          icon={<LineIcon className="h-4 w-4" />}
-          footer="Chưa có endpoint KPI từ backend"
-        />
-      </div>
-      <div className="lg:col-span-4">
-        <StatCard
-          title="Khách hàng mới"
-          value={isLoading ? "…" : formatNumber(0)}
-          icon={<UserPlus className="h-4 w-4" />}
-          footer="Chưa có endpoint KPI từ backend"
-        />
-      </div>
-      <div className="lg:col-span-4">
-        <StatCard
-          title="Tổng đơn hàng"
-          value={isLoading ? "…" : "—"}
-          icon={<CreditCard className="h-4 w-4" />}
-          footer="Chưa có endpoint KPI từ backend"
-        />
-      </div>
-
-      {isAuthDead && (
-        <div className="lg:col-span-8">
-          <Card className="border-amber-500/40">
-            <CardContent className="flex items-start gap-3 p-4 text-sm">
-              <Database className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
-              <div>
-                <p className="font-medium text-amber-700 dark:text-amber-300">
-                  Không thể tải số liệu tổng hợp
-                </p>
-                <p className="mt-1 text-amber-700/80 dark:text-amber-200/80">
-                  Các số liệu doanh thu, đơn hàng, khách hàng cần auth token còn hiệu lực. Vui lòng làm mới token tại trang Cài đặt.
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
-
-      {/* Spacer so the visitors chart + orders table sit cleanly on
-          the next row regardless of how many tiles above landed. */}
-      <div className="hidden lg:col-span-12 lg:block" />
-    </>
-  );
-}
-
 // Re-export the icon type so consumers get autocomplete. (Unused at
 // runtime — only here so `import { type LucideIcon }` doesn't strip
 // tree-shaking warnings.)
 export type { LucideIcon };
-
-// Suppress formatVND "unused" warning — we keep the helper available
-// in this file for future real KPIs but it's intentionally not
-// called today.
-void formatVND;

@@ -87,6 +87,16 @@ class FinancialSummaryResponse(BaseModel):
     currency: str = "VND"
     sales_balance: FinancialMetricValue | None = None
     earnings_balance: FinancialMetricValue | None = None
+    total_orders: int = 0
+    """Count of orders archived locally in ``[start_date, end_date]``.
+
+    Populated by the router from ``OrderArchive.first_seen_at`` for the
+    operator's owned store(s). Lives at the top level (next to
+    ``sales_balance``) because the dashboard renders it as a peer
+    KPI ("Tổng đơn") on the same row as Doanh thu / Chiết khấu /
+    Thu nhập ròng — pairing the money totals with a count makes the
+    average-order-value implicit (sales / total_orders).
+    """
     metrics: list[FinancialMetricGroup] = Field(default_factory=list)
     ui_breakdown: list[dict[str, Any]] | None = None
     warnings: list[str] = Field(default_factory=list)

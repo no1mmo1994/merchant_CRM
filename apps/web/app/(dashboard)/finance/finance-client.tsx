@@ -7,7 +7,6 @@ import {
   CalendarRange,
   Coins,
   DollarSign,
-  Loader2,
   Receipt,
   RefreshCw,
   Wallet,
@@ -20,7 +19,6 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   useFinanceSummary,
@@ -32,6 +30,7 @@ import {
   type FinancialSettlement,
 } from "@/lib/api/finance";
 import { ApiError } from "@/lib/api";
+import { DateRangePicker, defaultDateRange } from "@/components/dashboard/DateRangePicker";
 import { toast } from "sonner";
 
 /** Format a VND amount in `12.000 ₫` style matching the Grab Merchant UI. */
@@ -120,15 +119,6 @@ function deriveSettlementDates(row: FinancialSettlement): {
   return { display: derivedDisplay, transaction: derivedTx };
 }
 
-/** Default range = last 7 days, inclusive. */
-function defaultRange(): { from: string; to: string } {
-  const today = new Date();
-  const start = new Date(today);
-  start.setDate(start.getDate() - 6);
-  const iso = (d: Date) => d.toISOString().slice(0, 10);
-  return { from: iso(start), to: iso(today) };
-}
-
 interface MetricCardProps {
   icon: React.ReactNode;
   label: string;
@@ -211,7 +201,7 @@ function MetricGroupRow({ group }: MetricGroupProps) {
 }
 
 export function FinanceClient() {
-  const initial = React.useMemo(defaultRange, []);
+  const initial = React.useMemo(defaultDateRange, []);
   const [from, setFrom] = React.useState<string>(initial.from);
   const [to, setTo] = React.useState<string>(initial.to);
   const [appliedFrom, setAppliedFrom] = React.useState<string>(initial.from);
@@ -302,43 +292,15 @@ export function FinanceClient() {
           </Button>
         </CardHeader>
         <CardContent>
-          <form
-            className="flex flex-wrap items-end gap-3"
-            onSubmit={(e) => {
-              e.preventDefault();
-              applyRange();
-            }}
-          >
-            <label className="flex flex-col gap-1 text-xs text-(--color-muted-foreground)">
-              Từ ngày
-              <Input
-                type="date"
-                value={from}
-                onChange={(e) => setFrom(e.target.value)}
-                max={to || undefined}
-                className="w-[170px]"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-xs text-(--color-muted-foreground)">
-              Đến ngày
-              <Input
-                type="date"
-                value={to}
-                onChange={(e) => setTo(e.target.value)}
-                min={from || undefined}
-                className="w-[170px]"
-              />
-            </label>
-            <Button type="submit" disabled={query.isFetching} className="gap-1.5">
-              {query.isFetching ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Coins className="h-3.5 w-3.5" />
-              )}
-              Áp dụng
-            </Button>
-            <div className="ml-auto text-xs text-(--color-muted-foreground)">
-              {data?.date_range ? (
+          <DateRangePicker
+            from={from}
+            to={to}
+            isLoading={query.isFetching}
+            onFromChange={setFrom}
+            onToChange={setTo}
+            onApply={applyRange}
+            footer={
+              data?.date_range ? (
                 <>
                   Đang xem:{" "}
                   <span className="font-mono">{data.date_range.from}</span> →{" "}
@@ -347,11 +309,9 @@ export function FinanceClient() {
                     {data.currency || "VND"}
                   </span>
                 </>
-              ) : (
-                <span>Đang đồng bộ từ Grab…</span>
-              )}
-            </div>
-          </form>
+              ) : undefined
+            }
+          />
         </CardContent>
       </Card>
 

@@ -82,6 +82,7 @@ class SourceSummary(BaseModel):
     merchant_id: str = Field(alias="merchantId")
     address: str = Field(default="", alias="address")
     name: str = Field(default="", alias="name")
+    region: str = Field(default="", alias="region")
     order_count: int = Field(default=0, alias="orderCount")
     distinct_customers: int = Field(default=0, alias="distinctCustomers")
 

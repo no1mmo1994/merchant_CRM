@@ -224,10 +224,11 @@ def get_customers_overview(
         merchant_id = row.merchant_id or ""
         source_counts[merchant_id] = source_counts.get(merchant_id, 0) + 1
 
-    # Look up Store.address + Store.name per distinct merchant_id (one
-    # store row per branch in this codebase — Store.merchant_id is
-    # unique). Missing row → empty strings (e.g. archive from a branch
-    # whose Store was deleted). Single batched query, not N+1.
+    # Look up Store.address + Store.name + Store.region per distinct
+    # merchant_id (one store row per branch in this codebase —
+    # Store.merchant_id is unique). Missing row → empty strings (e.g.
+    # archive from a branch whose Store was deleted). Single batched
+    # query, not N+1.
     #
     # ``name`` is the fallback subtitle when ``address`` is empty so
     # the merchant can still identify the branch — registration
@@ -235,29 +236,37 @@ def get_customers_overview(
     # ``business_attributes`` doesn't always include an address, so
     # without this fallback every card would just show the opaque
     # merchant_id UUID.
-    store_meta_by_mid: dict[str, tuple[str, str]] = {}
+    #
+    # ``region`` is the auto-derived city/province (e.g. "Đà Nẵng")
+    # populated by ``app.core.region.extract_city`` at write time. The
+    # dashboard renders it as a region badge next to the address; the
+    # partner API reads it to label each order's `source` field as
+    # ``"GF " + region`` so partners can route orders by geography
+    # without re-parsing the address string.
+    store_meta_by_mid: dict[str, tuple[str, str, str]] = {}
     if source_counts:
         from sqlmodel import select as _sel
         mids = [m for m in source_counts if m]
         if mids:
             store_rows = session.exec(
-                _sel(Store.merchant_id, Store.address, Store.name).where(
+                _sel(Store.merchant_id, Store.address, Store.name, Store.region).where(
                     Store.merchant_id.in_(mids)
                 )
             ).all()
             store_meta_by_mid = {
-                mid: (addr or "", name or "")
-                for mid, addr, name in store_rows
+                mid: (addr or "", name or "", region or "")
+                for mid, addr, name, region in store_rows
             }
 
     sources = []
     for mid, count in sorted(source_counts.items()):
-        addr, sname = store_meta_by_mid.get(mid, ("", ""))
+        addr, sname, sregion = store_meta_by_mid.get(mid, ("", "", ""))
         sources.append(
             SourceSummary(
                 merchantId=mid,
                 address=addr,
                 name=sname,
+                region=sregion,
                 orderCount=count,
                 distinctCustomers=len(source_phone_seen.get(mid, set())),
             )

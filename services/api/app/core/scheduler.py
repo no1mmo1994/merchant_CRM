@@ -29,6 +29,7 @@ import httpx
 from sqlmodel import Session
 
 from app.core.db import session_scope
+from app.core.region import extract_city
 from app.core.security import decrypt_token, encrypt_token
 from app.models import AuditLog, OrderArchive, OrderSnapshot, Store
 
@@ -148,9 +149,21 @@ def job_sync_all_menus() -> None:
 
 
 def _sync_one_store(store_id: int) -> None:
-    """Refresh store name/address from Grab's business_attributes."""
+    """Refresh store name/address from Grab's unified-profile.
+
+    Switched from `get_business_attributes` (403s for many merchants —
+    confirmed by uvicorn log: ``business-attributes failed for
+    d9b1aa9b-1c29-4342-b1e7-a3853cdf25a0: 403 Forbidden``) to
+    `get_unified_profile`, which is the same endpoint the auth router
+    uses immediately after login and which reliably returns the
+    merchant block containing `name` + `address`.
+
+    The route also re-derives `region` from the new address so the
+    partner API gets a fresh label even when the operator moves
+    stores across cities.
+    """
     from grab import GrabClient
-    from grab.endpoints.store import get_business_attributes
+    from grab.endpoints.profile import get_unified_profile
 
     with session_scope() as session:
         store = session.get(Store, store_id)
@@ -161,24 +174,42 @@ def _sync_one_store(store_id: int) -> None:
 
     async def _drive() -> dict[str, Any]:
         async with GrabClient(authn_token=authn, merchant_id=merchant_id) as client:
-            return await get_business_attributes(client)
+            return await get_unified_profile(client)
 
     try:
         loop = asyncio.new_event_loop()
         try:
-            attrs = loop.run_until_complete(_drive())
+            unified = loop.run_until_complete(_drive())
         finally:
             loop.close()
-        # Update null address/name if Grab returned them
+
+        merchant_block = (
+            ((unified.get("data") or {}).get("grab_food_profile") or {}).get("merchant")
+            if isinstance(unified, dict)
+            else {}
+        ) or {}
+        new_name = str(merchant_block.get("name") or "").strip()
+        new_address = str(merchant_block.get("address") or "").strip()
+
+        # Update name/address/region only when unified-profile actually
+        # returned non-empty values. An empty response preserves any
+        # previously persisted data so a partial Grab outage can't blank
+        # the dashboard.
         with session_scope() as session:
             s = session.get(Store, store_id)
             if s is not None:
-                if not s.name and attrs.get("name"):
-                    s.name = str(attrs["name"])
-                if not s.address and attrs.get("address"):
-                    s.address = str(attrs["address"])
-                session.add(s)
-                session.commit()
+                changed = False
+                if new_name and not s.name:
+                    s.name = new_name
+                    changed = True
+                if new_address:
+                    if s.address != new_address:
+                        s.address = new_address
+                        s.region = extract_city(new_address)
+                        changed = True
+                if changed:
+                    session.add(s)
+                    session.commit()
         log.info("store_sync: store=%s ok", merchant_id)
     except Exception as exc:  # noqa: BLE001
         log.warning("store_sync: store=%s failed: %s", merchant_id, exc)

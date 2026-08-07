@@ -44,9 +44,10 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlmodel import Session
 
-from app.deps import get_grab_client, require_user
-from app.models import User
+from app.deps import get_session, get_grab_client, require_user
+from app.models import OrderArchive, Store, User
 from app.schemas.finance import (
     FinancialMetricGroup,
     FinancialMetricValue,
@@ -289,9 +290,72 @@ def _project_metrics(
     return out
 
 
+def _count_orders_in_range(
+    session: Session,
+    user_id: int,
+    start_date: str,
+    end_date: str,
+) -> int:
+    """Count orders archived locally for the operator within the date range.
+
+    The 30s ``orders_poll`` cron writes every order it sees into
+    ``OrderArchive`` with ``first_seen_at`` stamped at first-sight
+    time. This count surfaces that local snapshot to the dashboard
+    as the "Tổng đơn" KPI on the overview — paired with the
+    money totals it makes the implicit average-order-value
+    (``sales_balance / total_orders``) obvious without an extra
+    metric.
+
+    Args:
+        session: SQLModel session bound to the app's engine.
+        user_id: Currently authenticated operator's id. We scope
+            the count to stores they own so two operators sharing
+            one DB never see each other's volume.
+        start_date: ISO-8601 ``YYYY-MM-DD`` inclusive lower bound.
+        end_date: ISO-8601 ``YYYY-MM-DD`` inclusive upper bound
+            (we extend by one day internally so the comparison
+            matches ``end_date 23:59:59`` rather than ``00:00:00``).
+
+    Returns:
+        Count of ``OrderArchive`` rows whose ``first_seen_at`` falls
+        inside ``[start_date 00:00:00, end_date+1day 00:00:00)``
+        and whose ``store.owner_user_id == user_id``. Zero if the
+        operator has no owned store (degrades gracefully instead
+        of raising).
+    """
+    from datetime import datetime, timedelta
+    from sqlmodel import func, select as _sel
+
+    try:
+        lo = datetime.fromisoformat(start_date)
+        hi_exclusive = datetime.fromisoformat(end_date) + timedelta(days=1)
+    except ValueError:
+        # Bad date string — return 0 rather than 500. The router's
+        # Pydantic ``pattern=`` already rejects malformed dates
+        # before we get here; this is a belt-and-suspenders for
+        # downstream regressions.
+        return 0
+
+    owned_store_ids = list(
+        session.exec(
+            _sel(Store.id).where(Store.owner_user_id == user_id)
+        ).all()
+    )
+    if not owned_store_ids:
+        return 0
+
+    count = session.exec(
+        _sel(func.count(OrderArchive.id)).where(
+            OrderArchive.store_id.in_(owned_store_ids),
+            OrderArchive.first_seen_at >= lo,
+            OrderArchive.first_seen_at < hi_exclusive,
+        )
+    ).one()
+    return int(count or 0)
+
+
 def _grab_failure(exc: httpx.HTTPStatusError) -> HTTPException:
     """Translate a Grab HTTPStatusError into a structured 502.
-
     Mirrors the ``code``/``message``/``grab_status``/``grab_body``
     envelope used by ``items.py`` so the frontend can surface a single
     toast string. The Vietnamese copy here is short and stable so
@@ -319,6 +383,7 @@ async def get_summary(
     end_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$", description="YYYY-MM-DD"),
     user: User = Depends(require_user),
     client=Depends(get_grab_client),
+    session: Session = Depends(get_session),
 ) -> FinancialSummaryResponse:
     """Return the financial summary for ``[start_date, end_date]``.
 
@@ -389,11 +454,31 @@ async def get_summary(
     if not metric_groups and not (sales_int or earn_int):
         warnings.append("Chưa có dữ liệu doanh thu trong khoảng thời gian đã chọn.")
 
+    # Count orders archived locally for the operator. We do this
+    # AFTER the Grab fetch so a slow Grab response doesn't hold the
+    # session open while we read it. The count is scoped to the
+    # operator's owned store(s) so two operators sharing the DB
+    # never see each other's volume. Failures here degrade to 0
+    # rather than 500 — the dashboard shows "0 đơn" and the user
+    # can refresh; a hard error would block the entire summary.
+    total_orders = 0
+    try:
+        total_orders = _count_orders_in_range(
+            session, user.id, start_date, end_date,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "finance_summary: total_orders count failed user=%s: %r",
+            user.id, exc,
+        )
+        total_orders = 0
+
     return FinancialSummaryResponse(
         date_range={"from": start_date, "to": end_date},
         currency=currency_name,
         sales_balance=FinancialMetricValue(display=sales_display, value_minor=sales_int),
         earnings_balance=FinancialMetricValue(display=earn_display, value_minor=earn_int),
+        total_orders=total_orders,
         metrics=metric_groups,
         ui_breakdown=raw_breakdown if isinstance(raw_breakdown, list) else None,
         warnings=warnings,

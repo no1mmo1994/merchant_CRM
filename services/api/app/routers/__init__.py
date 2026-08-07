@@ -11,6 +11,7 @@ from app.routers.items import router as items_router
 from app.routers.menu import router as menu_router
 from app.routers.modifiers import router as modifiers_router
 from app.routers.orders import router as orders_router
+from app.routers.partner import router as partner_router
 from app.routers.stores import router as stores_router
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "menu_router",
     "modifiers_router",
     "orders_router",
+    "partner_router",
     "stores_router",
 ]

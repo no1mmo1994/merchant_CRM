@@ -178,36 +178,63 @@ function CustomerCard({ customer }: { customer: CustomerSummary }) {
 }
 
 function SourceCard({ source }: { source: SourceSummary }) {
-  // Subtitle priority: address → store name → nothing. Grab's
-  // ``business_attributes`` doesn't always return an address, so
-  // ``Store.address`` is often empty at registration time; the shop
-  // ``name`` is the next best identifier so the merchant can still
-  // tell branches apart instead of staring at the merchant_id UUID.
-  const subtitle = source.address || source.name;
-  const subtitleIsName = !source.address && !!source.name;
+  // Display priority — what the operator sees at a glance:
+  //   1) Address is the primary identifier (per operator request).
+  //      A merchant with many branches needs to see WHERE each
+  //      branch is, not just its UUID.
+  //   2) Region badge sits next to the address so they can spot
+  //      which city/province it belongs to without parsing the
+  //      Vietnamese district from the comma-separated string.
+  //   3) Shop name is a secondary subtitle — useful when two
+  //      branches share an address block (rare) or when the
+  //      address hasn't been hydrated yet (legacy rows).
+  //   4) Fallback: when neither address nor name is present we
+  //      show the merchantId UUID so the card is never blank.
+  const showAddress = !!source.address;
+  const showName = !!source.name && source.name !== (showAddress ? source.address : "");
+  const showRegion = !!source.region;
+  const showMerchantIdFallback = !showAddress && !source.name;
+
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">
-          <span className="inline-flex items-center gap-2">
-            <Store className="h-4 w-4 text-(--color-muted-foreground)" />
-            {source.name || source.merchantId}
-          </span>
-        </CardTitle>
-        {subtitle && (
-          <div className="mt-1 flex items-start gap-1.5 text-xs text-(--color-muted-foreground)">
-            {subtitleIsName ? (
-              <Store className="mt-0.5 h-3 w-3 shrink-0" />
-            ) : (
-              <MapPin className="mt-0.5 h-3 w-3 shrink-0" />
-            )}
-            <span className="line-clamp-2">{subtitle}</span>
+        {/* Title row: shop name + region badge */}
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <CardTitle className="text-base">
+            <span className="inline-flex items-center gap-2">
+              <Store className="h-4 w-4 text-(--color-muted-foreground)" />
+              {showMerchantIdFallback ? (
+                <span className="font-mono text-sm">{source.merchantId}</span>
+              ) : (
+                source.name || source.address
+              )}
+            </span>
+          </CardTitle>
+          {showRegion && (
+            <Badge variant="secondary" className="font-medium">
+              {source.region}
+            </Badge>
+          )}
+        </div>
+        {/* Address (primary location identifier) */}
+        {showAddress && source.name && (
+          <div className="mt-2 flex items-start gap-1.5 text-xs text-(--color-muted-foreground)">
+            <MapPin className="mt-0.5 h-3 w-3 shrink-0" />
+            <span className="line-clamp-2">{source.address}</span>
           </div>
         )}
-        {source.name && source.address && (
+        {/* Shop name as subtitle when address is shown above as the title */}
+        {showAddress && showName && (
           <div className="mt-1 flex items-start gap-1.5 text-xs text-(--color-muted-foreground)">
             <Store className="mt-0.5 h-3 w-3 shrink-0" />
             <span className="line-clamp-2">{source.name}</span>
+          </div>
+        )}
+        {/* Address as subtitle when name is the title (no address shown above) */}
+        {!showAddress && showName && showMerchantIdFallback === false && (
+          <div className="mt-1 flex items-start gap-1.5 text-xs text-(--color-muted-foreground)">
+            <MapPin className="mt-0.5 h-3 w-3 shrink-0" />
+            <span className="line-clamp-2">—</span>
           </div>
         )}
       </CardHeader>

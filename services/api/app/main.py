@@ -57,6 +57,7 @@ from app.routers import (  # noqa: F401  (routers self-register)
     menu_router,
     modifiers_router,
     orders_router,
+    partner_router,
     stores_router,
 )
 
@@ -189,6 +190,7 @@ def create_app() -> FastAPI:
     app.include_router(orders_router)
     app.include_router(customers_router)
     app.include_router(audit_router)
+    app.include_router(partner_router)
 
     # ── Static endpoints ──────────────────────────────────────────────────────────
     @app.get("/")

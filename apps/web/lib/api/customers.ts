@@ -54,6 +54,18 @@ export interface SourceSummary {
   address: string;
   /** Wire key `name` — human-readable shop name from Store.name. Used as the subtitle fallback when `address` is empty so the merchant can identify the branch without leaving the page. */
   name: string;
+  /**
+   * Wire key `region` — auto-derived city/province (e.g.
+   * `"Đà Nẵng"`, `"TP.HCM"`). Populated by the backend at write
+   * time from `Store.address` via `app.core.region.extract_city`.
+   * Empty when the address doesn't resolve to a known city OR
+   * when no address was ever persisted. The dashboard renders
+   * this as a badge next to the address so the operator can
+   * see at a glance which region this branch belongs to — and
+   * the partner API uses it to label the `source` field as
+   * `"GF " + region`.
+   */
+  region: string;
   /** Wire key `orderCount` — total distinct orders under this merchant_id. */
   orderCount: number;
   /** Wire key `distinctCustomers` — count of unique `mobileNumber` values under this merchant_id. */

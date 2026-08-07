@@ -82,6 +82,15 @@ export interface LoginErrorDetail {
    * default; absent on other error codes.
    */
   retry_after_seconds?: number;
+  /**
+   * Grab's own classifier string, normalised by the backend (e.g.
+   * "invalid verify challenge payload"). Narrow and pre-classified —
+   * never the raw upstream body, which the backend deliberately
+   * withholds. Present on `grab_rate_limited` and `wrong_password` so
+   * triage can tell a rejected password apart from an expired challenge
+   * session without reading server logs.
+   */
+  grab_reason?: string | null;
 }
 
 /**

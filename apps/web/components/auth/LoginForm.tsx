@@ -374,6 +374,13 @@ function XrayField({
  * a fresh x-ray token (their device clock has drifted, or Grab rejected
  * the HMAC) — `bannerTone` is the place where those visual categories
  * live.
+ *
+ * `wrong_password` and `invalid_email` are deliberately NOT in that
+ * token-recapture family and carry their own labels: both come from
+ * credential steps the x-ray token either never touches (step 2 sends no
+ * `x-ray` header) or has already cleared (step 1). Labelling them "token"
+ * is what previously sent operators off to re-capture a working token.
+ * Codes with no case fall through to the generic "Đăng nhập thất bại".
  */
 function bannerTone(code: import("@/lib/api/auth").LoginErrorDetail["code"]): {
   Icon: typeof AlertTriangle;
@@ -399,6 +406,23 @@ function bannerTone(code: import("@/lib/api/auth").LoginErrorDetail["code"]): {
       return {
         Icon: XCircle,
         label: "Token server bị từ chối",
+        className:
+          "border-red-500/40 bg-red-500/10 text-red-900 dark:text-red-100",
+      };
+    // Credential errors get their own labels so the banner never says
+    // "token" for a failure the token had no part in — step 2 (password)
+    // carries no x-ray header, and step 1 (email) already passed it.
+    case "wrong_password":
+      return {
+        Icon: XCircle,
+        label: "Sai mật khẩu Grab",
+        className:
+          "border-red-500/40 bg-red-500/10 text-red-900 dark:text-red-100",
+      };
+    case "invalid_email":
+      return {
+        Icon: XCircle,
+        label: "Email không đúng",
         className:
           "border-red-500/40 bg-red-500/10 text-red-900 dark:text-red-100",
       };

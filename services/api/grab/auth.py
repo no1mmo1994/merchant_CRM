@@ -139,7 +139,22 @@ class LoginError(RuntimeError):
     @property
     def is_xray_rejected(self) -> bool:
         """True if the failure looks like Grab rejected the x-ray token
-        specifically (signature mismatch, expired, replay, …)."""
+        specifically (signature mismatch, expired, replay, …).
+
+        Step 2 is excluded unconditionally. `verifyChallenge` is sent
+        WITHOUT an `x-ray` header at all — `XRayProvider` documents it and
+        `StaticXRayProvider.get()` returns "" for step 2 — so a step-2
+        failure can never be Grab rejecting a token we did not send.
+        Without this guard the substring scan below misfires on Grab's own
+        vocabulary: the endpoint is literally named `verifyChallenge`, so
+        its errors routinely carry "challenge" (e.g.
+        ERROR_CODE_INVALID_VERIFY_CHALLENGE_PAYLOAD, which
+        `_classify_grab_error` flattens to "invalid verify challenge
+        payload"). That misfire sent operators off to re-capture a token
+        Grab had already accepted at step 1, hiding the real step-2 cause.
+        """
+        if self.step == 2:
+            return False
         if not self.grab_reason:
             return False
         reason = self.grab_reason.lower()

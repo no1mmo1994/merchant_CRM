@@ -19,6 +19,7 @@ from sqlmodel import Session
 
 from app.core.config import settings
 from app.core.limiter import limiter
+from app.core.region import extract_city
 from app.core.security import (
     _extract_cookie_domain,
     clear_session_cookie,
@@ -111,6 +112,31 @@ async def login(
     display_token: str = result.display_token
     profile: dict = result.profile or {}
 
+    # ── Fetch merchant address from unified-profile (best-effort) ─────────────
+    # business-attributes 403's for some merchants (see scheduler log); the
+    # unified-profile endpoint is the only one that reliably returns the
+    # store address. We try it once — failures are non-fatal because the
+    # operator can still log in without an address; the 24h `store_sync`
+    # cron will retry it on the next cycle.
+    merchant_address: str = ""
+    try:
+        from grab import GrabClient
+        from grab.endpoints.profile import get_unified_profile
+
+        async with GrabClient(authn_token=authn_token, merchant_id="") as client:
+            unified = await get_unified_profile(client)
+        merchant_block = (
+            ((unified.get("data") or {}).get("grab_food_profile") or {}).get("merchant")
+            if isinstance(unified, dict)
+            else {}
+        ) or {}
+        merchant_address = str(merchant_block.get("address") or "").strip()
+    except Exception as exc:  # noqa: BLE001 — non-fatal, address is best-effort
+        log.warning(
+            "unified-profile address fetch failed for %s: %s",
+            payload.email, exc,
+        )
+
     # ── Extract merchant_id + store name from the profile ──────────────────────
     # The v2/details response shape (see `Login/login1-done.py` output):
     #   {
@@ -174,7 +200,8 @@ async def login(
         store = Store(
             merchant_id=merchant_id,
             name=store_name,
-            address="",  # merchant address lookup deferred to Phase 06
+            address=merchant_address,
+            region=extract_city(merchant_address),
             encrypted_auth_token=enc_authn,
             encrypted_display_token=enc_display,
             encrypted_xray_token=enc_xray,
@@ -189,6 +216,12 @@ async def login(
         store.last_refresh_at = datetime.utcnow()
         # Keep the user-visible name fresh — Grab admins can rename a store.
         store.name = store_name
+        # Only overwrite address if unified-profile actually returned one.
+        # An empty `merchant_address` keeps the prior persisted value so
+        # a transient unified-profile 5xx doesn't blank the source card.
+        if merchant_address:
+            store.address = merchant_address
+            store.region = extract_city(merchant_address)
     session.commit()
     session.refresh(store)
 
@@ -356,6 +389,25 @@ def _login_error_to_http(
     HTTP 429 with a `clock_drift` reason shows up as both rate-limited and
     clock-drifted). We pick the most actionable one for the user.
     """
+    # Log every classified login failure before branching. The response body
+    # deliberately withholds `raw_body` (see branch 7), and the early
+    # branches used to return without logging anything at all — so a failure
+    # left no server-side trace of WHICH step broke or what Grab actually
+    # said. That blind spot is what let a step-2 password rejection get
+    # investigated as an x-ray token problem for days. `step` is the single
+    # most diagnostic field here: it says whether the x-ray token (steps 1
+    # and 3) was even involved.
+    log.warning(
+        "login failed: step=%s http_status=%s grab_reason=%r "
+        "grab_message=%r source=%s request_id=%s",
+        exc.step,
+        exc.http_status,
+        exc.grab_reason,
+        exc.grab_message,
+        source,
+        exc.request_id,
+    )
+
     # ── 1. Clock drift — check FIRST because Grab also returns 429 ─────────────
     if exc.is_clock_drift:
         age_h = _xray_jwt_age_hours(xray_token)
@@ -482,7 +534,26 @@ def _login_error_to_http(
     # Status code: Grab returns 401/403 for bad passwords. Some clients
     # have observed 400 with a reason string — we honour the reason as a
     # secondary signal so those don't fall through to the generic message.
-    _PASSWORD_REASON_TOKENS = ("password", "credential", "auth", "login")
+    # `challenge payload` catches Grab's own code for a rejected PWD_V2
+    # answer: ERROR_CODE_INVALID_VERIFY_CHALLENGE_PAYLOAD, which
+    # `_classify_grab_error` flattens to "invalid verify challenge payload".
+    # Grab never names the password there — for challengeType PWD_V2 the
+    # `payload` IS the password, so a rejected payload is a rejected
+    # password. Safe to scan for only because the whole predicate is gated
+    # on `exc.step == 2`, the sole step whose job is verifying that password.
+    #
+    # Deliberately NOT `verify challenge`: that broader prefix would also
+    # swallow any other ERROR_CODE_VERIFY_CHALLENGE_* Grab might emit on the
+    # same endpoint (a session-expired or timeout variant), mislabelling it
+    # as a bad password. We have captured evidence for exactly one code, so
+    # we match exactly that one. Widen only against real captured traffic.
+    _PASSWORD_REASON_TOKENS = (
+        "password",
+        "credential",
+        "auth",
+        "login",
+        "challenge payload",
+    )
     is_password_failure = exc.step == 2 and (
         exc.http_status in (401, 403)
         or (
@@ -495,11 +566,23 @@ def _login_error_to_http(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={
                 "code": "wrong_password",
-                "message": "The Grab password didn't match. Try again.",
-                "hint": "Caps Lock off? Try logging into the Grab app to confirm.",
+                "message": (
+                    "The Grab password didn't match. Your x-ray token is "
+                    "fine — Grab already accepted it at step 1 to issue the "
+                    "challenge; only the password check failed."
+                ),
+                "hint": (
+                    "Caps Lock off? Confirm the password by signing in to "
+                    "the Grab Merchant app. Re-capturing the x-ray token "
+                    "will not help here."
+                ),
                 "fields": ["password"],
                 "source": source,
                 "request_id": exc.request_id,
+                # Echo Grab's own classifier so a future triage can tell a
+                # rejected password apart from an expired challenge session
+                # without re-reading server logs.
+                "grab_reason": exc.grab_reason,
             },
         )
 

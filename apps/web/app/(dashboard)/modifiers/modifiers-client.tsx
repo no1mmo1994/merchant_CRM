@@ -9,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { ModifierEditor } from "@/components/modifiers/ModifierEditor";
 import { EditModifierGroupDialog } from "@/components/modifiers/EditModifierGroupDialog";
+import { LinkItemsDialog } from "@/components/modifiers/LinkItemsDialog";
 import {
   listModifierGroupsRaw,
   useDeleteModifierGroup,
@@ -128,6 +129,7 @@ function GroupCard({ group, onChanged }: GroupCardProps) {
             )}
           />
         </button>
+        <LinkItemsDialog group={group} onSaved={onChanged} />
         <EditModifierGroupDialog group={group} onSaved={onChanged} />
         <Button
           variant="ghost"

@@ -14,10 +14,12 @@ from app.routers.modifiers import (
     _selection_range_error,
     create_group,
     delete_group,
+    set_group_items,
     update_group,
 )
 from app.schemas import (
     CreateModifierGroupRequest,
+    LinkModifierGroupItemsRequest,
     ModifierSpec,
     UpdateModifierGroupRequest,
 )
@@ -1040,3 +1042,343 @@ async def test_update_modifier_group_grab_409_unparseable_body_falls_back_to_con
     detail = exc_info.value.detail
     assert detail["code"] == "grab_modifier_group_conflict"
     assert detail["fields"] == ["group_name"]
+
+
+# ── link_modifier_group_to_item() -- captured endpoint shape ─────────────────────
+#
+# Captured from the Merchant app in donhang/lienkettuychon.py: one POST per
+# item, {itemID, modifierGroupID}, answered 204. The 409-means-already-linked
+# behaviour is the router's job (set_group_items below), not this function's --
+# it just raises on anything non-2xx like every other write here.
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_link_modifier_group_to_item_sends_ids_and_succeeds(
+    authn_token: str, merchant_id: str
+) -> None:
+    route = respx.post(
+        "https://api.grab.com/food/merchant/v2/item-modifier-groups"
+    ).mock(return_value=httpx.Response(204))
+
+    async with GrabClient(authn_token=authn_token, merchant_id=merchant_id) as c:
+        await modifiers.link_modifier_group_to_item(
+            c, modifier_group_id="MOG1", item_id="ITEM1"
+        )
+
+    assert route.called
+    req = route.calls[0].request
+    assert req.url.path == "/food/merchant/v2/item-modifier-groups"
+    assert json.loads(req.content) == {"itemID": "ITEM1", "modifierGroupID": "MOG1"}
+
+
+# ── set_group_items() -- PUT /api/modifiers/groups/{id}/items ────────────────────
+#
+# `item_ids` is the desired END STATE, not a delta: the router reads /menu
+# once, diffs current-linked vs. desired, links what's missing (cheap,
+# dedicated endpoint), and unlinks what's extra (expensive read-modify-write
+# through upsert-item -- no captured unlink endpoint exists). Direct-router-
+# call style, same as delete_group/update_group above. Every test here mocks
+# the concurrency-handling/enter lock explicitly: acquire_menu_edit_lock only
+# swallows httpx.HTTPError, and an unmocked respx route raises something else
+# entirely, so a missing mock here fails loudly rather than looking like a
+# lock failure.
+
+_LOCK_URL = "https://api.grab.com/food/merchant/v1/concurrency-handling/enter"
+_MENU_URL = "https://api.grab.com/food/merchant/v2/menu"
+_LINK_URL = "https://api.grab.com/food/merchant/v2/item-modifier-groups"
+_UPSERT_URL = "https://api.grab.com/food/merchant/v2/upsert-item"
+
+
+def _menu_item(item_id: str, *, linked: list[str] | None = None, **overrides) -> dict:
+    """Minimal item dict, good enough for both the link-state diff walk and
+    the full read-modify-write _rewrite_item does on unlink."""
+    item = {
+        "itemID": item_id,
+        "itemName": f"Item {item_id}",
+        "priceInMin": 10000,
+        "linkedModifierGroupIDs": list(linked or []),
+        "eligibleSellingStatus": "ELIGIBLE",
+    }
+    item.update(overrides)
+    return item
+
+
+def _nested_menu(*items: dict, category_id: str = "CAT1") -> dict:
+    """A `/menu` payload using ONLY the nested sections[].categories[].items[]
+    shape -- deliberately no top-level "categories" key, since that's the
+    real shape a live store returns and the flat-only walk was a real bug
+    elsewhere in this repo (see test_items.py's nested-menu regression)."""
+    return {
+        "sections": [
+            {
+                "categories": [
+                    {"categoryID": category_id, "categoryName": "Cat", "items": list(items)}
+                ]
+            }
+        ]
+    }
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_group_items_happy_path_links_missing_leaves_linked_unchanged(
+    authn_token: str, merchant_id: str, db_session
+) -> None:
+    """A already linked, B not; request [A, B] -> B gets linked, A is
+    reported unchanged (no request made for it), nothing is unlinked, and
+    the expensive unlink path (upsert-item) is never touched. Also pins
+    the audit log row."""
+    user = User(username="set-items-happy@example.com", password_hash="x")
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    respx.get(_MENU_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=_nested_menu(
+                _menu_item("A", linked=["MOG1"]),
+                _menu_item("B", linked=[]),
+            ),
+        )
+    )
+    respx.post(_LOCK_URL).mock(return_value=httpx.Response(200))
+    link_route = respx.post(_LINK_URL).mock(return_value=httpx.Response(204))
+    upsert_route = respx.post(_UPSERT_URL).mock(
+        return_value=httpx.Response(200, json={"itemID": "unused"})
+    )
+
+    body = LinkModifierGroupItemsRequest(item_ids=["A", "B"])
+    async with GrabClient(authn_token=authn_token, merchant_id=merchant_id) as c:
+        result = await set_group_items("MOG1", body, user=user, client=c, session=db_session)
+
+    assert result.linked == ["B"]
+    assert result.unchanged == ["A"]
+    assert result.unlinked == []
+    assert result.failed == {}
+    assert result.lock_acquired is True
+    assert link_route.call_count == 1
+    assert json.loads(link_route.calls[0].request.content) == {
+        "itemID": "B",
+        "modifierGroupID": "MOG1",
+    }
+    assert not upsert_route.called
+
+    logs = db_session.query(AuditLog).all()
+    assert len(logs) == 1
+    assert logs[0].action == "modifier_group.set_items"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_group_items_unlink_path_rewrites_item_and_drops_group_id(
+    authn_token: str, merchant_id: str, db_session
+) -> None:
+    """A is linked to MOG1 (and unrelated MOG2); request [] -> A goes
+    through upsert-item (no captured unlink endpoint exists) with only
+    MOG1 dropped from linkedModifierGroupIDs, and lands in `unlinked`."""
+    user = User(username="set-items-unlink@example.com", password_hash="x")
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    respx.get(_MENU_URL).mock(
+        return_value=httpx.Response(
+            200, json=_nested_menu(_menu_item("A", linked=["MOG1", "MOG2"]))
+        )
+    )
+    respx.post(_LOCK_URL).mock(return_value=httpx.Response(200))
+    upsert_route = respx.post(_UPSERT_URL).mock(
+        return_value=httpx.Response(200, json={"itemID": "A"})
+    )
+
+    body = LinkModifierGroupItemsRequest(item_ids=[])
+    async with GrabClient(authn_token=authn_token, merchant_id=merchant_id) as c:
+        result = await set_group_items("MOG1", body, user=user, client=c, session=db_session)
+
+    assert result.unlinked == ["A"]
+    assert result.linked == []
+    assert result.failed == {}
+    assert upsert_route.called
+    payload = json.loads(upsert_route.calls[0].request.content)
+    assert payload["item"]["linkedModifierGroupIDs"] == ["MOG2"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_group_items_reconciles_both_directions_in_one_call(
+    authn_token: str, merchant_id: str, db_session
+) -> None:
+    """A linked, B not; request [B] -> A gets unlinked AND B gets linked in
+    the same call."""
+    user = User(username="set-items-both@example.com", password_hash="x")
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    respx.get(_MENU_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=_nested_menu(
+                _menu_item("A", linked=["MOG1"]),
+                _menu_item("B", linked=[]),
+            ),
+        )
+    )
+    respx.post(_LOCK_URL).mock(return_value=httpx.Response(200))
+    respx.post(_LINK_URL).mock(return_value=httpx.Response(204))
+    respx.post(_UPSERT_URL).mock(return_value=httpx.Response(200, json={"itemID": "A"}))
+
+    body = LinkModifierGroupItemsRequest(item_ids=["B"])
+    async with GrabClient(authn_token=authn_token, merchant_id=merchant_id) as c:
+        result = await set_group_items("MOG1", body, user=user, client=c, session=db_session)
+
+    assert result.linked == ["B"]
+    assert result.unlinked == ["A"]
+    assert result.unchanged == []
+    assert result.failed == {}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_group_items_link_409_counts_as_unchanged_not_failed(
+    authn_token: str, merchant_id: str, db_session
+) -> None:
+    """Grab 409 on link means the pair is already linked -- the requested
+    end state already holds, so the item must land in `unchanged`, never
+    in `failed`, and the route must not raise (still succeeds)."""
+    user = User(username="set-items-409@example.com", password_hash="x")
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    respx.get(_MENU_URL).mock(
+        return_value=httpx.Response(200, json=_nested_menu(_menu_item("A", linked=[])))
+    )
+    respx.post(_LOCK_URL).mock(return_value=httpx.Response(200))
+    respx.post(_LINK_URL).mock(
+        return_value=httpx.Response(409, json={"message": "already linked"})
+    )
+
+    body = LinkModifierGroupItemsRequest(item_ids=["A"])
+    async with GrabClient(authn_token=authn_token, merchant_id=merchant_id) as c:
+        result = await set_group_items("MOG1", body, user=user, client=c, session=db_session)
+
+    assert result.unchanged == ["A"]
+    assert result.linked == []
+    assert result.failed == {}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_group_items_non_409_link_failure_reported_others_still_processed(
+    authn_token: str, merchant_id: str, db_session
+) -> None:
+    """A 500 on one item's link must not abort the batch: it lands in
+    `failed` with the status code, the route still succeeds (no
+    exception), and the OTHER item in the same batch still gets linked --
+    partial success is the normal case, not an exception."""
+    user = User(username="set-items-partial@example.com", password_hash="x")
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    respx.get(_MENU_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json=_nested_menu(
+                _menu_item("FAIL", linked=[]),
+                _menu_item("OK", linked=[]),
+            ),
+        )
+    )
+    respx.post(_LOCK_URL).mock(return_value=httpx.Response(200))
+
+    def _link_side_effect(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if payload["itemID"] == "FAIL":
+            return httpx.Response(500, text="boom")
+        return httpx.Response(204)
+
+    respx.post(_LINK_URL).mock(side_effect=_link_side_effect)
+
+    body = LinkModifierGroupItemsRequest(item_ids=["FAIL", "OK"])
+    async with GrabClient(authn_token=authn_token, merchant_id=merchant_id) as c:
+        result = await set_group_items("MOG1", body, user=user, client=c, session=db_session)
+
+    assert result.failed == {"FAIL": "HTTP 500"}
+    assert result.linked == ["OK"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_group_items_lock_refused_still_attempts_and_reports_links(
+    authn_token: str, merchant_id: str, db_session
+) -> None:
+    """A non-200 on the lock call means lock_acquired=False -- but the
+    lock is best-effort, so the actual link/unlink writes must still be
+    attempted and their outcome still reported."""
+    user = User(username="set-items-lock-refused@example.com", password_hash="x")
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    respx.get(_MENU_URL).mock(
+        return_value=httpx.Response(200, json=_nested_menu(_menu_item("A", linked=[])))
+    )
+    respx.post(_LOCK_URL).mock(
+        return_value=httpx.Response(409, json={"message": "locked by another session"})
+    )
+    link_route = respx.post(_LINK_URL).mock(return_value=httpx.Response(204))
+
+    body = LinkModifierGroupItemsRequest(item_ids=["A"])
+    async with GrabClient(authn_token=authn_token, merchant_id=merchant_id) as c:
+        result = await set_group_items("MOG1", body, user=user, client=c, session=db_session)
+
+    assert result.lock_acquired is False
+    assert result.linked == ["A"]
+    assert link_route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_group_items_finds_items_in_nested_sections_shape(
+    authn_token: str, merchant_id: str, db_session
+) -> None:
+    """The flat-only category walk was a real bug elsewhere in this repo
+    (see test_items.py's set_item_availability nested-menu regression) --
+    pin that `_items_linked_to_group` also finds items nested under
+    sections[].categories[].items[], not just a top-level `categories`
+    list. No item-modifier-groups route is mocked at all: if the nested
+    walk missed A, the router would treat it as not-yet-linked and try to
+    link it, which would blow up on respx's "unmocked route" error instead
+    of quietly sending a spurious request."""
+    user = User(username="set-items-nested@example.com", password_hash="x")
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    menu = {
+        # Deliberately no top-level "categories" key at all.
+        "sections": [
+            {
+                "categories": [
+                    {
+                        "categoryID": "CAT-NESTED",
+                        "categoryName": "Món chính",
+                        "items": [_menu_item("A", linked=["MOG1"])],
+                    }
+                ]
+            }
+        ]
+    }
+    respx.get(_MENU_URL).mock(return_value=httpx.Response(200, json=menu))
+    respx.post(_LOCK_URL).mock(return_value=httpx.Response(200))
+
+    body = LinkModifierGroupItemsRequest(item_ids=["A"])
+    async with GrabClient(authn_token=authn_token, merchant_id=merchant_id) as c:
+        result = await set_group_items("MOG1", body, user=user, client=c, session=db_session)
+
+    assert result.unchanged == ["A"]
+    assert result.linked == []

@@ -123,6 +123,31 @@ export interface DeleteModifierGroupResult {
   deleted: boolean;
 }
 
+/**
+ * The full set of menu items that should offer a group — a desired end
+ * state, not a delta. Items left out get unlinked, so the picker can be
+ * a plain checkbox list and the server works out the difference.
+ */
+export interface SetGroupItemsInput {
+  item_ids: string[];
+}
+
+export interface SetGroupItemsResult {
+  modifier_group_id: string;
+  linked: string[];
+  unlinked: string[];
+  /** Already in the requested state; no request was made for these. */
+  unchanged: string[];
+  /** `{item_id: reason}` for items Grab rejected. Partial success is normal. */
+  failed: Record<string, string>;
+  /**
+   * False when Grab refused the menu edit lock. The writes were still
+   * attempted, but conflicts are likelier — worth surfacing rather than
+   * letting a 409 look inexplicable.
+   */
+  lock_acquired: boolean;
+}
+
 const MODIFIER_GROUPS_KEY = ["modifier-groups"] as const;
 
 async function listModifierGroups(): Promise<ModifierGroup[]> {
@@ -149,6 +174,16 @@ async function updateModifierGroup(
 ): Promise<UpdateModifierGroupResult> {
   return api.put<UpdateModifierGroupResult>(
     `/api/modifiers/groups/${encodeURIComponent(groupId)}`,
+    input,
+  );
+}
+
+async function setGroupItems(
+  groupId: string,
+  input: SetGroupItemsInput,
+): Promise<SetGroupItemsResult> {
+  return api.put<SetGroupItemsResult>(
+    `/api/modifiers/groups/${encodeURIComponent(groupId)}/items`,
     input,
   );
 }
@@ -205,6 +240,24 @@ export function useDeleteModifierGroup() {
   return useMutation({
     mutationFn: deleteModifierGroup,
     onSuccess: () => qc.invalidateQueries({ queryKey: MODIFIER_GROUPS_KEY }),
+  });
+}
+
+/**
+ * Set which menu items offer a group. Invalidates the menu too — link
+ * state lives on the items, so a stale menu would show the old picture.
+ * As with the other mutations here, the /modifiers page keeps its own
+ * reload() and needs calling separately.
+ */
+export function useSetGroupItems() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ groupId, input }: { groupId: string; input: SetGroupItemsInput }) =>
+      setGroupItems(groupId, input),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: MODIFIER_GROUPS_KEY });
+      void qc.invalidateQueries({ queryKey: ["menu"] });
+    },
   });
 }
 

@@ -272,6 +272,77 @@ async def delete_modifier_group(
     res.raise_for_status()
 
 
+async def link_modifier_group_to_item(
+    client: GrabClient,
+    *,
+    modifier_group_id: str,
+    item_id: str,
+) -> None:
+    """POST /food/merchant/v2/item-modifier-groups — attach a group to one item.
+
+    Captured from the Merchant app in `donhang/lienkettuychon.py`: one
+    request per item, `{itemID, modifierGroupID}`, answered 204.
+
+    Grab answers **409 when the pair is already linked**. That is not an
+    error the operator needs to see — re-linking is a no-op — so the
+    router treats it as success. Every other status raises.
+    """
+    res = await client.post(
+        "/food/merchant/v2/item-modifier-groups",
+        json={"itemID": item_id, "modifierGroupID": modifier_group_id},
+    )
+    res.raise_for_status()
+
+
+async def unlink_modifier_group_from_item(
+    client: GrabClient,
+    *,
+    modifier_group_id: str,
+    item_id: str,
+    menu: dict | None = None,
+) -> None:
+    """Detach a group from one item by rewriting the item's linked list.
+
+    ⚠️ No captured traffic exists for unlinking. There is no known
+    counterpart to `POST /item-modifier-groups`, so this goes the long way
+    round: read the item out of `/menu`, drop `modifier_group_id` from its
+    `linkedModifierGroupIDs`, and write the whole item back through
+    `upsert-item`.
+
+    That is the same read-modify-write shape `set_item_availability`
+    already uses, on an endpoint this codebase exercises constantly — so
+    the mechanism is proven even though this particular use of it is not.
+    The cost is real though: it rewrites every field of the item, so a
+    field that round-trips badly corrupts more than the link. Prefer a
+    captured DELETE if one ever turns up.
+
+    A no-op when the item does not reference the group.
+
+    Pass `menu` when unlinking a batch: without it this fetches the whole
+    menu once to find the item and the rewrite fetches it AGAIN, so
+    N items cost 2N reads of Grab's largest payload.
+    """
+    from grab.endpoints.items import set_item_linked_modifier_groups
+    from grab.endpoints.menu import find_item_with_category, get_full_menu
+
+    if menu is None:
+        menu = await get_full_menu(client)
+    found = find_item_with_category(menu, item_id) if isinstance(menu, dict) else None
+    if found is None:
+        raise ValueError(f"item {item_id} not found in current menu")
+    item, _ = found
+
+    current = [str(g) for g in (item.get("linkedModifierGroupIDs") or [])]
+    if modifier_group_id not in current:
+        return
+    await set_item_linked_modifier_groups(
+        client,
+        item_id=item_id,
+        menu=menu,
+        linked_modifier_group_ids=[g for g in current if g != modifier_group_id],
+    )
+
+
 async def list_modifier_groups(client: GrabClient) -> list[dict]:
     """GET /food/merchant/v2/menu/modifier-groups — list all modifier groups.
 

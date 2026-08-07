@@ -15,6 +15,8 @@ from app.schemas import (
     CreateModifierGroupRequest,
     CreateModifierGroupResponse,
     DeleteModifierGroupResponse,
+    LinkModifierGroupItemsRequest,
+    LinkModifierGroupItemsResponse,
     ListModifierGroupsResponse,
     ModifierGroup,
     ModifierGroupCategoryLink,
@@ -28,7 +30,9 @@ from grab.endpoints.menu import get_full_menu
 from grab.endpoints.modifiers import (
     create_modifier_group,
     delete_modifier_group,
+    link_modifier_group_to_item,
     list_modifier_groups,
+    unlink_modifier_group_from_item,
     update_modifier_group,
     verify_modifier,
 )
@@ -851,6 +855,142 @@ async def update_group(
         modifier_group_id=group_id,
         modifier_group_name=body.group_name,
         verified=verified,
+    )
+
+
+def _items_linked_to_group(menu: dict[str, Any] | None, group_id: str) -> set[str]:
+    """Every menu item id that currently offers `group_id`."""
+    linked: set[str] = set()
+    for cat in _iter_menu_categories(menu or {}):
+        for item in cat.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if _item_references_group(item, group_id):
+                iid = str(item.get("itemID") or item.get("skuID") or "")
+                if iid:
+                    linked.add(iid)
+    return linked
+
+
+@router.put("/groups/{group_id}/items", response_model=LinkModifierGroupItemsResponse)
+async def set_group_items(
+    group_id: str,
+    body: LinkModifierGroupItemsRequest,
+    user: User = Depends(require_user),
+    client=Depends(get_grab_client),
+    session=Depends(get_session),
+) -> LinkModifierGroupItemsResponse:
+    """Set exactly which menu items offer this modifier group.
+
+    `item_ids` is the desired end state. Items in it that aren't linked
+    get linked; items currently linked that aren't in it get unlinked.
+    Sending the desired set rather than a delta means the picker can be a
+    plain list of checkboxes and the server works out the difference —
+    and a stale client can't double-link or double-remove.
+
+    The two directions are not symmetric, and the asymmetry is Grab's:
+
+      * **Link** has a dedicated endpoint, one cheap call per item,
+        captured from the app in `donhang/lienkettuychon.py`.
+      * **Unlink** has no known endpoint. It rewrites the whole item
+        through `upsert-item` — one `/menu` read plus one full item write
+        each. Slower and blunter, so unlinking a long list is
+        deliberately the expensive path.
+
+    A menu edit lock is taken first. Grab's app does this before touching
+    the menu specifically to avoid 409s, and this codebase never did.
+    Failing to get it is logged and reported, not fatal.
+    """
+    from app.deps import write_audit_log
+    from grab.endpoints.concurrency import acquire_menu_edit_lock
+
+    desired = {str(i).strip() for i in body.item_ids if str(i).strip()}
+
+    # One menu read decides both directions. `_known_groups`-style
+    # snapshots are avoided here: link state lives on the items, and
+    # `/menu` is the only place that carries it.
+    try:
+        menu = await get_full_menu(client)
+    except httpx.HTTPStatusError as exc:
+        raise _grab_write_error(exc, what="menu read for link") from exc
+    except httpx.HTTPError as exc:
+        raise _grab_unreachable(exc, what="menu read for link") from exc
+
+    current = _items_linked_to_group(menu if isinstance(menu, dict) else {}, group_id)
+    to_link = sorted(desired - current)
+    to_unlink = sorted(current - desired)
+    unchanged = sorted(desired & current)
+
+    lock_acquired = await acquire_menu_edit_lock(client)
+
+    linked: list[str] = []
+    unlinked: list[str] = []
+    failed: dict[str, str] = {}
+
+    for item_id in to_link:
+        try:
+            await link_modifier_group_to_item(
+                client, modifier_group_id=group_id, item_id=item_id
+            )
+            linked.append(item_id)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                # Already linked on Grab's side even though `/menu` didn't
+                # say so — a stale read, not a failure. The end state is
+                # what the caller asked for either way.
+                unchanged.append(item_id)
+                continue
+            failed[item_id] = f"HTTP {exc.response.status_code}"
+            log.warning("link %s -> %s failed: %s", group_id, item_id, exc.response.status_code)
+        except httpx.HTTPError as exc:
+            failed[item_id] = "unreachable"
+            log.warning("link %s -> %s transport error: %r", group_id, item_id, exc)
+
+    for item_id in to_unlink:
+        try:
+            # Reuse the menu already read above. Re-fetching per item
+            # would cost 2 full-menu reads each, and nginx cuts /api off
+            # at 60s — a 30-item unlink would time out mid-batch with no
+            # way for the operator to know how far it got.
+            await unlink_modifier_group_from_item(
+                client,
+                modifier_group_id=group_id,
+                item_id=item_id,
+                menu=menu if isinstance(menu, dict) else None,
+            )
+            unlinked.append(item_id)
+        except httpx.HTTPStatusError as exc:
+            failed[item_id] = f"HTTP {exc.response.status_code}"
+            log.warning("unlink %s -> %s failed: %s", group_id, item_id, exc.response.status_code)
+        except (httpx.HTTPError, ValueError) as exc:
+            failed[item_id] = "unreachable" if isinstance(exc, httpx.HTTPError) else str(exc)
+            log.warning("unlink %s -> %s failed: %r", group_id, item_id, exc)
+
+    write_audit_log(
+        session=session,
+        user_id=user.id,
+        action="modifier_group.set_items",
+        entity_type="modifier_group",
+        entity_id=group_id,
+        payload={
+            "linked": linked,
+            "unlinked": unlinked,
+            # The whole mapping, not `sorted(failed)` — sorting a dict
+            # yields its keys, so the audit trail recorded WHICH items
+            # failed but threw away WHY, which is the part you need when
+            # reading it back weeks later.
+            "failed": dict(failed),
+            "lock_acquired": lock_acquired,
+        },
+    )
+
+    return LinkModifierGroupItemsResponse(
+        modifier_group_id=group_id,
+        linked=linked,
+        unlinked=unlinked,
+        unchanged=sorted(set(unchanged)),
+        failed=failed,
+        lock_acquired=lock_acquired,
     )
 
 

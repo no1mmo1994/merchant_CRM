@@ -183,3 +183,100 @@ async def test_set_item_availability_item_not_found_raises(
     async with GrabClient(authn_token=authn_token, merchant_id=merchant_id) as c:
         with pytest.raises(ValueError, match="not found"):
             await items.set_item_availability(c, item_id="MISSING", available=True)
+
+
+# ── _rewrite_item() extraction -- eligibleSellingStatus regression ──────────────
+#
+# `set_item_availability` used to have its own read-modify-write logic; it was
+# extracted into the shared `_rewrite_item` helper so `set_item_linked_modifier_
+# groups` (linking/unlinking modifier groups, see grab/endpoints/modifiers.py)
+# could reuse it instead of duplicating the whole upsert-item reconstruction.
+# Two things must both still hold after that extraction: the availability path
+# must still send eligibleSellingStatus correctly (it's the one override that
+# path actually cares about), and an UNRELATED rewrite must PRESERVE whatever
+# eligibleSellingStatus the item already had rather than defaulting it to
+# ELIGIBLE -- silently re-enabling a hidden item just because someone changed
+# its linked modifier groups would be a nasty regression.
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_item_availability_still_sends_eligible_selling_status(
+    authn_token: str, merchant_id: str
+) -> None:
+    respx.get("https://api.grab.com/food/merchant/v2/menu").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "categories": [
+                    {
+                        "categoryID": "CAT1",
+                        "categoryName": "Món chính",
+                        "items": [
+                            {
+                                "itemID": "ITEM1",
+                                "itemName": "Phở bò",
+                                "priceInMin": 45000,
+                                "eligibleSellingStatus": "INELIGIBLE",
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+    )
+    upsert_route = respx.post("https://api.grab.com/food/merchant/v2/upsert-item").mock(
+        return_value=httpx.Response(200, json={"itemID": "ITEM1"})
+    )
+
+    async with GrabClient(authn_token=authn_token, merchant_id=merchant_id) as c:
+        await items.set_item_availability(c, item_id="ITEM1", available=True)
+
+    payload = json.loads(upsert_route.calls[0].request.content)
+    assert payload["item"]["eligibleSellingStatus"] == "ELIGIBLE"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_item_linked_modifier_groups_preserves_existing_ineligible_status(
+    authn_token: str, merchant_id: str
+) -> None:
+    """set_item_linked_modifier_groups doesn't pass eligible_selling_status as
+    an override -- _rewrite_item must fall back to reading it off the item
+    (INELIGIBLE here) rather than defaulting to ELIGIBLE."""
+    respx.get("https://api.grab.com/food/merchant/v2/menu").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "categories": [
+                    {
+                        "categoryID": "CAT1",
+                        "categoryName": "Món chính",
+                        "items": [
+                            {
+                                "itemID": "ITEM1",
+                                "itemName": "Phở bò",
+                                "priceInMin": 45000,
+                                "eligibleSellingStatus": "INELIGIBLE",
+                                "linkedModifierGroupIDs": ["MOG-OLD"],
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+    )
+    upsert_route = respx.post("https://api.grab.com/food/merchant/v2/upsert-item").mock(
+        return_value=httpx.Response(200, json={"itemID": "ITEM1"})
+    )
+
+    async with GrabClient(authn_token=authn_token, merchant_id=merchant_id) as c:
+        await items.set_item_linked_modifier_groups(
+            c, item_id="ITEM1", linked_modifier_group_ids=["MOG-NEW"]
+        )
+
+    payload = json.loads(upsert_route.calls[0].request.content)
+    # The thing actually being changed by this call:
+    assert payload["item"]["linkedModifierGroupIDs"] == ["MOG-NEW"]
+    # The thing that must NOT change as a side effect of the rewrite:
+    assert payload["item"]["eligibleSellingStatus"] == "INELIGIBLE"

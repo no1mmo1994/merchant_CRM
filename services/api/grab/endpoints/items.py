@@ -64,6 +64,9 @@ async def create_or_update_item(
     item_id: str | None = None,
     eligible_selling_status: str = "ELIGIBLE",
     available_status: int = 1,
+    #: Weight-priced item. Hardcoded False before, which silently
+    #: converted such items to unit-priced on any round-trip.
+    sold_by_weight: bool = False,
     sold_quantity: int = 0,
     sort_order: int | None = None,
     available_at: str = "0001-01-01T00:00:00.000Z",
@@ -129,7 +132,7 @@ async def create_or_update_item(
         "categoryName": "",
         "soldQuantity": int(sold_quantity),
         "availableAt": available_at,
-        "soldByWeight": False,
+        "soldByWeight": bool(sold_by_weight),
         "supportedAttributeClusterIDs": [],
         "aiGeneratedFields": [],
         "availableStatus": int(available_status),
@@ -151,6 +154,32 @@ async def create_or_update_item(
     return res.json()
 
 
+async def set_item_linked_modifier_groups(
+    client: GrabClient,
+    *,
+    item_id: str,
+    linked_modifier_group_ids: list[str],
+    menu: dict | None = None,
+) -> dict:
+    """Replace the set of modifier groups an item offers.
+
+    Same read-modify-write as `set_item_availability` — Grab's
+    `upsert-item` takes the whole item, so we read it back out of `/menu`,
+    change one field, and write it all again.
+
+    Used for UNLINKING. Linking has a dedicated, captured endpoint
+    (`link_modifier_group_to_item`) which is far cheaper; nothing
+    equivalent has been captured for removal, so removal goes through the
+    full item. Prefer the dedicated endpoint whenever one turns up.
+    """
+    return await _rewrite_item(
+        client,
+        item_id=item_id,
+        menu=menu,
+        linked_modifier_group_ids=list(linked_modifier_group_ids),
+    )
+
+
 async def set_item_availability(
     client: GrabClient,
     *,
@@ -159,19 +188,44 @@ async def set_item_availability(
 ) -> dict:
     """Toggle the storefront availability of an existing menu item.
 
-    Grab's upsert-item endpoint requires the full item payload, so we
-    have to fetch the existing item first via /menu, mutate only the
-    availability flag, and write it back. This keeps name/price/desc
-    unchanged while flipping `eligibleSellingStatus`.
-
     On a 5xx from Grab, raises the underlying httpx error.
     """
+    return await _rewrite_item(
+        client,
+        item_id=item_id,
+        eligible_selling_status="ELIGIBLE" if available else "INELIGIBLE",
+    )
+
+
+async def _rewrite_item(
+    client: GrabClient,
+    *,
+    item_id: str,
+    menu: dict | None = None,
+    **overrides,
+) -> dict:
+    """Read an item out of `/menu`, change some fields, write it back.
+
+    Grab's `upsert-item` requires the full item payload, so changing one
+    property means round-tripping all of them. Every caller that mutates
+    an existing item shares this, so the reconstruction — and the
+    category-resolution rule below, which is easy to get wrong and
+    destructive when you do — lives in exactly one place.
+
+    `overrides` replaces any keyword `create_or_update_item` accepts.
+
+    Pass `menu` when the caller already holds a `/menu` payload. `/menu`
+    is the heaviest response Grab serves, and a batch that rewrites N
+    items would otherwise fetch it N times to read N items out of the
+    same snapshot.
+    """
     if not item_id:
-        raise ValueError("item_id is required to toggle availability")
+        raise ValueError("item_id is required")
 
     from grab.endpoints.menu import find_item_with_category, get_full_menu
 
-    menu = await get_full_menu(client)
+    if menu is None:
+        menu = await get_full_menu(client)
     if not isinstance(menu, dict):
         raise ValueError("menu payload from Grab was not a dict")
 
@@ -210,25 +264,44 @@ async def set_item_availability(
     sort_order = target.get("sortOrder")
     available_at = str(target.get("availableAt") or "0001-01-01T00:00:00.000Z")
 
-    return await create_or_update_item(
-        client,
-        name_vi=name_vi,
-        name_en=name_en,
-        description_vi=description_vi,
-        description_en=description_en,
-        price_vnd=price_vnd,
-        category_id=category_id,
-        image_urls=image_urls,
-        webp_urls=webp_urls,
-        webp_url=webp_url,
-        linked_modifier_group_ids=linked_modifier_group_ids,
-        selling_time_id=selling_time_id,
-        item_id=item_id,
-        sold_quantity=sold_quantity,
-        sort_order=int(sort_order) if isinstance(sort_order, (int, float)) else None,
-        available_at=available_at,
-        eligible_selling_status="ELIGIBLE" if available else "INELIGIBLE",
-    )
+    fields: dict = {
+        "name_vi": name_vi,
+        "name_en": name_en,
+        "description_vi": description_vi,
+        "description_en": description_en,
+        "price_vnd": price_vnd,
+        "category_id": category_id,
+        "image_urls": image_urls,
+        "webp_urls": webp_urls,
+        "webp_url": webp_url,
+        "linked_modifier_group_ids": linked_modifier_group_ids,
+        "selling_time_id": selling_time_id,
+        "item_id": item_id,
+        "sold_quantity": sold_quantity,
+        "sort_order": int(sort_order) if isinstance(sort_order, (int, float)) else None,
+        "available_at": available_at,
+        # Preserve whatever the item already is unless the caller says
+        # otherwise. Defaulting these would silently un-hide an item every
+        # time someone changed an unrelated field.
+        #
+        # Two separate flags govern "is this item visible/sellable", and
+        # BOTH have to be carried:
+        #   eligibleSellingStatus — ELIGIBLE / INELIGIBLE
+        #   availableStatus       — 1 available, 2/3 sold out, 7 hidden
+        # `create_or_update_item` defaults availableStatus to 1, so
+        # omitting it here turned every rewrite into "un-hide and mark in
+        # stock". An operator who hid an item and later unticked it in the
+        # topping picker would have watched it reappear on the storefront.
+        "eligible_selling_status": str(
+            target.get("eligibleSellingStatus") or "ELIGIBLE"
+        ),
+        "available_status": int(target.get("availableStatus") or 1),
+        # Same reasoning: hardcoding this to False silently converts a
+        # weight-priced item to unit-priced.
+        "sold_by_weight": bool(target.get("soldByWeight", False)),
+    }
+    fields.update(overrides)
+    return await create_or_update_item(client, **fields)
 
 
 async def set_item_availability_status(

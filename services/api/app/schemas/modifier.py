@@ -65,6 +65,40 @@ class UpdateModifierGroupResponse(BaseModel):
     verified: bool = True
 
 
+class LinkModifierGroupItemsRequest(BaseModel):
+    """The full set of menu items that should offer this group.
+
+    A desired state, not a delta: items missing from the list get
+    unlinked. That mirrors the picker UI, where the operator ticks and
+    unticks a list and presses save once.
+    """
+
+    item_ids: list[str] = []
+
+
+class LinkModifierGroupItemsResponse(BaseModel):
+    """Per-item outcome of reconciling the link set.
+
+    Reported per item rather than as one flag because Grab is asked once
+    per item and any of them can fail on its own — a partial result is
+    the normal case, not an exception, and the operator needs to know
+    which items actually changed.
+    """
+
+    modifier_group_id: str
+    linked: list[str] = []
+    unlinked: list[str] = []
+    #: Already in the requested state; no request was made for these.
+    unchanged: list[str] = []
+    #: `{item_id: reason}` for items Grab rejected.
+    failed: dict[str, str] = {}
+    #: False when Grab refused the menu edit lock. The writes were still
+    #: attempted — see `acquire_menu_edit_lock` — but a 409 here is more
+    #: likely, so say the lock was missing rather than let it look
+    #: inexplicable.
+    lock_acquired: bool = True
+
+
 class DeleteModifierGroupResponse(BaseModel):
     """Confirmation for a deleted group.
 

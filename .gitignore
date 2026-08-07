@@ -72,3 +72,12 @@ coverage/
 api.out.log
 next-*.log
 
+
+# Captured traffic / scratch artifacts — routinely carry auth headers or
+# store data, and none of it belongs in history.
+cookies.txt
+direct.json
+*.har
+tmp_*.txt
+services/api/tmp_*.txt
+*.log

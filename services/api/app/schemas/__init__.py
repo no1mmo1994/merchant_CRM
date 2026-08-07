@@ -54,11 +54,14 @@ from app.schemas.orders import (
 from app.schemas.modifier import (
     CreateModifierGroupRequest,
     CreateModifierGroupResponse,
+    DeleteModifierGroupResponse,
     ListModifierGroupsResponse,
     ModifierGroup,
     ModifierGroupCategoryLink,
     ModifierOption,
     ModifierSpec,
+    UpdateModifierGroupRequest,
+    UpdateModifierGroupResponse,
     VerifyModifierRequest,
 )
 from app.schemas.store import (
@@ -136,10 +139,13 @@ __all__ = [
     # modifier
     "CreateModifierGroupRequest",
     "CreateModifierGroupResponse",
+    "DeleteModifierGroupResponse",
     "ListModifierGroupsResponse",
     "ModifierGroup",
     "ModifierGroupCategoryLink",
     "ModifierOption",
     "ModifierSpec",
+    "UpdateModifierGroupRequest",
+    "UpdateModifierGroupResponse",
     "VerifyModifierRequest",
 ]

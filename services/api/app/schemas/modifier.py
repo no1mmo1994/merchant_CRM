@@ -9,6 +9,14 @@ class ModifierSpec(BaseModel):
     name: str
     name_en: str = ""
     price_vnd: int
+    #: Grab's own id for an already-existing modifier. Empty means "this
+    #: is a new option, let Grab mint an id". On update this MUST be
+    #: echoed back for every option the operator kept, otherwise Grab
+    #: treats them as new: the old ones are dropped and recreated with
+    #: fresh ids, which silently breaks any order history or item linkage
+    #: pointing at the previous ids. Ignored on create (nothing exists
+    #: yet), so the field is safe to carry on the shared spec.
+    modifier_id: str = ""
 
 
 class VerifyModifierRequest(BaseModel):
@@ -27,6 +35,49 @@ class CreateModifierGroupRequest(BaseModel):
 class CreateModifierGroupResponse(BaseModel):
     modifier_group_id: str
     modifier_group_name: str
+
+
+class UpdateModifierGroupRequest(BaseModel):
+    """Body for editing an existing group.
+
+    Same shape as create minus the id (which travels in the path). The
+    `modifiers` list is a full replacement, not a delta: whatever the
+    operator left in the editor is the group's new content. Options the
+    operator kept must carry their `modifier_id` so Grab updates them in
+    place instead of dropping and recreating them — see `ModifierSpec`.
+    """
+
+    group_name: str
+    selection_range_min: int = 0
+    selection_range_max: int = 1
+    modifiers: list[ModifierSpec] = []
+
+
+class UpdateModifierGroupResponse(BaseModel):
+    modifier_group_id: str
+    modifier_group_name: str
+    #: False when the server could not confirm Grab edited in place
+    #: rather than creating a duplicate — the group listing was
+    #: unreadable, or the before/after snapshots came from different
+    #: Grab surfaces and diffing them would be meaningless. The write
+    #: itself succeeded; only the duplicate check was skipped. Surfacing
+    #: it beats silently implying a verification that never ran.
+    verified: bool = True
+
+
+class DeleteModifierGroupResponse(BaseModel):
+    """Confirmation for a deleted group.
+
+    Shaped like the category-delete response (`{"deleted": true}`) plus
+    the id, so the client can reconcile optimistically. Deliberately does
+    NOT re-report `linked_item_count`: the list endpoint already computed
+    it for the row the operator is looking at, so warning them "9 món sẽ
+    mất nhóm này" is a client-side concern and re-deriving it here would
+    cost two extra Grab round-trips per delete.
+    """
+
+    modifier_group_id: str
+    deleted: bool = True
 
 
 class ModifierOption(BaseModel):

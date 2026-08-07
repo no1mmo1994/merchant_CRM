@@ -5,15 +5,23 @@ import { api } from "@/lib/api";
  * Modifier-group API surface.
  *
  * Mirrors services/api/app/routers/modifiers.py.
- * GET  /api/modifiers        - list every modifier group on the store
- * POST /api/modifiers/verify - pre-flight check
- * POST /api/modifiers/groups - create new group
+ * GET    /api/modifiers                  - list every modifier group on the store
+ * POST   /api/modifiers/verify           - pre-flight check
+ * POST   /api/modifiers/groups           - create new group
+ * PUT    /api/modifiers/groups/{id}      - edit an existing group
+ * DELETE /api/modifiers/groups/{id}      - remove a group
  */
 
 export interface ModifierSpec {
   name: string;
   name_en?: string;
   price_vnd: number;
+  /**
+   * Grab's id for an option that already exists. Omit for a new option.
+   * On edit this must be echoed back for every option kept, otherwise
+   * Grab drops and recreates them under new ids.
+   */
+  modifier_id?: string;
 }
 
 export interface VerifyModifierInput extends ModifierSpec {}
@@ -80,6 +88,41 @@ export interface CreateModifierGroupResult {
   modifier_group_name: string;
 }
 
+/**
+ * Body for editing an existing group.
+ *
+ * `modifiers` is a full replacement of the group's options, not a delta.
+ * Every option the operator kept MUST carry its original `modifier_id`
+ * (see `ModifierSpec.modifier_id`) — dropping it makes Grab recreate the
+ * option under a fresh id, which breaks anything already pointing at the
+ * old one. New options leave it unset.
+ */
+export interface UpdateModifierGroupInput {
+  group_name: string;
+  selection_range_min?: number;
+  selection_range_max?: number;
+  modifiers?: ModifierSpec[];
+}
+
+export interface UpdateModifierGroupResult {
+  modifier_group_id: string;
+  modifier_group_name: string;
+  /**
+   * False when the server saved the change but could not confirm Grab
+   * edited in place rather than creating a duplicate — the group listing
+   * was unreadable, or the before/after snapshots came from different
+   * Grab surfaces. The edit itself went through; only the duplicate
+   * check was skipped, so the UI should say so instead of a plain
+   * success.
+   */
+  verified?: boolean;
+}
+
+export interface DeleteModifierGroupResult {
+  modifier_group_id: string;
+  deleted: boolean;
+}
+
 const MODIFIER_GROUPS_KEY = ["modifier-groups"] as const;
 
 async function listModifierGroups(): Promise<ModifierGroup[]> {
@@ -100,6 +143,22 @@ async function createModifierGroup(input: CreateModifierGroupInput): Promise<Cre
   return api.post<CreateModifierGroupResult>("/api/modifiers/groups", input);
 }
 
+async function updateModifierGroup(
+  groupId: string,
+  input: UpdateModifierGroupInput,
+): Promise<UpdateModifierGroupResult> {
+  return api.put<UpdateModifierGroupResult>(
+    `/api/modifiers/groups/${encodeURIComponent(groupId)}`,
+    input,
+  );
+}
+
+async function deleteModifierGroup(groupId: string): Promise<DeleteModifierGroupResult> {
+  return api.delete<DeleteModifierGroupResult>(
+    `/api/modifiers/groups/${encodeURIComponent(groupId)}`,
+  );
+}
+
 /** Pull every modifier group attached to the active store. */
 export function useModifierGroups() {
   return useQuery({
@@ -117,6 +176,34 @@ export function useCreateModifierGroup() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: createModifierGroup,
+    onSuccess: () => qc.invalidateQueries({ queryKey: MODIFIER_GROUPS_KEY }),
+  });
+}
+
+/**
+ * Edit an existing group.
+ *
+ * NOTE for callers: invalidating `MODIFIER_GROUPS_KEY` is not enough to
+ * refresh the /modifiers page. That page deliberately bypasses this
+ * query — it needs the `partial` / `source` fields that
+ * `useModifierGroups` discards — and keeps its own `reload()`. Call that
+ * too, the way `ModifierEditor` does via `onCreated`. The invalidation
+ * below still matters for any other consumer of the query.
+ */
+export function useUpdateModifierGroup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ groupId, input }: { groupId: string; input: UpdateModifierGroupInput }) =>
+      updateModifierGroup(groupId, input),
+    onSuccess: () => qc.invalidateQueries({ queryKey: MODIFIER_GROUPS_KEY }),
+  });
+}
+
+/** Delete a group. See `useUpdateModifierGroup` on refreshing the page. */
+export function useDeleteModifierGroup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: deleteModifierGroup,
     onSuccess: () => qc.invalidateQueries({ queryKey: MODIFIER_GROUPS_KEY }),
   });
 }

@@ -1,14 +1,17 @@
 "use client";
 
 import * as React from "react";
-import { AlertTriangle, ChevronDown } from "lucide-react";
+import { AlertTriangle, ChevronDown, Trash2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { ModifierEditor } from "@/components/modifiers/ModifierEditor";
+import { EditModifierGroupDialog } from "@/components/modifiers/EditModifierGroupDialog";
 import {
   listModifierGroupsRaw,
+  useDeleteModifierGroup,
   type ModifierGroup,
   type ModifierOption,
   type ListModifierGroupsResponse,
@@ -24,6 +27,8 @@ function formatVnd(value: number): string {
 
 interface GroupCardProps {
   group: ModifierGroup;
+  /** Re-fetch the list after this group was edited or deleted. */
+  onChanged?: () => void;
 }
 
 /**
@@ -33,57 +38,108 @@ interface GroupCardProps {
  * (replaces the meaningless "Nguồn: menu_fallback" badge).
  *
  * Click to expand the list of modifier rows; each row has an
- * availability toggle.
+ * availability toggle. Edit and delete live in the header, to the left
+ * of the chevron.
+ *
+ * The header used to be one big `<button>` wrapping everything. It is
+ * now a flex row: the disclosure `<button>` covers the text block and
+ * the chevron, and the action buttons sit beside it as siblings. Nesting
+ * them inside the disclosure button would be invalid HTML and breaks
+ * hydration — `CategoryCard` solves it the same way.
  */
-function GroupCard({ group }: GroupCardProps) {
+function GroupCard({ group, onChanged }: GroupCardProps) {
   const [open, setOpen] = React.useState(false);
   const bodyId = React.useId();
   const linkedCategories = group.linked_categories ?? [];
   const showCategories = linkedCategories.length > 0;
+  const deleteGroup = useDeleteModifierGroup();
+
+  async function handleDelete() {
+    const name = group.modifier_group_name || "(Không tên)";
+    const linked = group.linked_item_count ?? 0;
+    // No AlertDialog in this repo — destructive confirms are native,
+    // matching CategoryCard / settings-client. Spell out the blast
+    // radius: Grab lets you delete a group that items still use, and
+    // those items silently lose it.
+    const warning =
+      linked > 0
+        ? `\n\n${linked} món đang dùng nhóm này sẽ mất nhóm.`
+        : "";
+    if (!confirm(`Xóa nhóm tùy chọn "${name}"?${warning}\n\nThao tác này không thể hoàn tác.`)) {
+      return;
+    }
+    try {
+      await deleteGroup.mutateAsync(group.modifier_group_id);
+      toast.success(`Đã xóa "${name}"`);
+      onChanged?.();
+    } catch (err) {
+      const msg =
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Xóa nhóm tùy chọn thất bại";
+      toast.error(msg);
+    }
+  }
+
   return (
     <div className="overflow-hidden rounded-lg border border-(--color-border) bg-(--color-surface-2)">
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls={bodyId}
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between gap-2 p-4 text-left transition-colors hover:bg-(--color-surface-3)/40"
-      >
-        <div className="min-w-0">
-          <div className="truncate text-sm font-medium text-(--color-foreground)">
-            {group.modifier_group_name || "(Không tên)"}
-          </div>
-          <div className="mt-0.5 text-xs text-(--color-muted-foreground)">
-            Liên kết với {group.linked_item_count ?? 0} món
-          </div>
-          {showCategories && (
-            <div
-              className="mt-1 flex flex-wrap gap-1 text-[11px] text-(--color-muted-foreground)"
-              title={linkedCategories
-                .map((c) => `${c.category_name || "(không tên)"} (${c.category_id}) · ${c.item_count} món`)
-                .join("\n")}
-            >
-              <span>Thuộc:</span>
-              {linkedCategories.map((c) => (
-                <span
-                  key={c.category_id || c.category_name}
-                  className="rounded bg-(--color-brand)/10 px-1.5 py-0.5 font-mono text-[10px] text-(--color-brand)"
-                >
-                  {c.category_name || "(không tên)"}
-                  {c.category_id ? ` · ${c.category_id}` : ""}
-                  {c.item_count > 0 ? ` · ${c.item_count} món` : ""}
-                </span>
-              ))}
+      <div className="flex items-center gap-1 pr-2 transition-colors hover:bg-(--color-surface-3)/40">
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={() => setOpen((v) => !v)}
+          className="flex min-w-0 flex-1 items-center justify-between gap-2 p-4 text-left"
+        >
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium text-(--color-foreground)">
+              {group.modifier_group_name || "(Không tên)"}
             </div>
-          )}
-        </div>
-        <ChevronDown
-          className={cn(
-            "h-4 w-4 shrink-0 text-(--color-muted-foreground) transition-transform",
-            open && "rotate-180",
-          )}
-        />
-      </button>
+            <div className="mt-0.5 text-xs text-(--color-muted-foreground)">
+              Liên kết với {group.linked_item_count ?? 0} món
+            </div>
+            {showCategories && (
+              <div
+                className="mt-1 flex flex-wrap gap-1 text-[11px] text-(--color-muted-foreground)"
+                title={linkedCategories
+                  .map((c) => `${c.category_name || "(không tên)"} (${c.category_id}) · ${c.item_count} món`)
+                  .join("\n")}
+              >
+                <span>Thuộc:</span>
+                {linkedCategories.map((c) => (
+                  <span
+                    key={c.category_id || c.category_name}
+                    className="rounded bg-(--color-brand)/10 px-1.5 py-0.5 font-mono text-[10px] text-(--color-brand)"
+                  >
+                    {c.category_name || "(không tên)"}
+                    {c.category_id ? ` · ${c.category_id}` : ""}
+                    {c.item_count > 0 ? ` · ${c.item_count} món` : ""}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+          <ChevronDown
+            className={cn(
+              "h-4 w-4 shrink-0 text-(--color-muted-foreground) transition-transform",
+              open && "rotate-180",
+            )}
+          />
+        </button>
+        <EditModifierGroupDialog group={group} onSaved={onChanged} />
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7 flex-shrink-0 text-red-500 hover:bg-red-500/10 hover:text-red-500"
+          onClick={handleDelete}
+          disabled={deleteGroup.isPending}
+          aria-label={`Xóa ${group.modifier_group_name || "nhóm tùy chọn"}`}
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      </div>
       {open && (
         <div id={bodyId} className="border-t border-(--color-border) bg-(--color-background)">
           {group.modifiers.length === 0 ? (
@@ -220,6 +276,12 @@ export function ModifiersClient() {
                   <GroupCard
                     key={g.modifier_group_id || g.modifier_group_name}
                     group={g}
+                    // This page keeps its own `reload()` instead of the
+                    // React Query cache (it needs `partial`/`source`,
+                    // which useModifierGroups drops), so mutations must
+                    // refresh it explicitly — same wiring as
+                    // ModifierEditor's `onCreated` below.
+                    onChanged={() => void reload()}
                   />
                 ))}
               </div>

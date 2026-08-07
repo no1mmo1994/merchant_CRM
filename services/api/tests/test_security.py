@@ -174,4 +174,12 @@ class TestSessionCookie:
 
         clear_session_cookie(response)
 
-        assert response.delete_cookie_calls == [{"key": "pulseorder_session", "path": "/"}]
+        # `clear_session_cookie` always passes `domain` (via
+        # `_extract_cookie_domain`), even when it resolves to `None` (no
+        # `request` was passed here). This is deliberate: a cookie set
+        # with an explicit domain must be deleted with the SAME domain
+        # or the browser leaves the original cookie in place. See
+        # `app/core/security.py::_extract_cookie_domain` docstring.
+        assert response.delete_cookie_calls == [
+            {"key": "pulseorder_session", "path": "/", "domain": None}
+        ]

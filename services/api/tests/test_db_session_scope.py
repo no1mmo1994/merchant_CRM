@@ -110,13 +110,25 @@ def test_session_scope_yields_independent_sessions_in_sequence():
     state between scheduler jobs — one job's INSERT might appear in
     another's SELECT without explicit commit, violating the per-job
     isolation we want.
+
+    NOTE: this must keep a strong reference to each Session (not just its
+    ``id()``) until all three have been collected. ``id()`` only
+    guarantees uniqueness for objects that are alive AT THE SAME TIME —
+    CPython reclaims a Session's memory (refcounting) the instant it goes
+    out of scope at the end of each ``with`` block, so a later Session can
+    legitimately be allocated at the exact same address. Recording bare
+    ids let that allocator reuse masquerade as `session_scope` handing
+    back a stale/leaked Session, which it does not: `session_scope`
+    genuinely calls `Session(_engine)` fresh every time (see
+    `app/core/db.py`). This was a flaky test artifact, not a real bug.
     """
-    seen: list[int] = []
+    seen: list[Session] = []
     for _ in range(3):
         with session_scope() as s:
-            seen.append(id(s))
-    assert len(set(seen)) == 3, (
-        f"session_scope yielded the same Session {len(set(seen))} "
+            seen.append(s)  # keep alive so ids below can't collide via reuse
+    ids = {id(s) for s in seen}
+    assert len(ids) == 3, (
+        f"session_scope yielded the same Session {len(ids)} "
         "time(s) across 3 consecutive `with` blocks — that's a leak"
     )
 

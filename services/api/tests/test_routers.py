@@ -10,6 +10,7 @@ Rate-limit test overrides rate_limit_per_minute=2 via monkeypatch.
 from __future__ import annotations
 
 import io
+import json
 import os
 import time
 from typing import Generator
@@ -111,7 +112,24 @@ def client(engine, session: Session, test_settings: Settings) -> TestClient:
             # Build a fresh app that picks up the patched settings
             app = create_app()
 
-            with TestClient(app, raise_server_exceptions=True) as tc:
+            # base_url="http://localhost": TestClient's default base_url
+            # ("http://testserver") sends `Host: testserver`.
+            # `_extract_cookie_domain` (app/core/security.py) only skips
+            # scoping the cookie to a domain for `localhost` /
+            # `127.0.0.1` / `::1` — "testserver" isn't in that
+            # allow-list, so login/logout cookies get `Domain=testserver`
+            # (normalised to `.testserver` by the cookie jar). Python's
+            # `http.cookiejar` domain-matching then refuses to send that
+            # cookie back on a follow-up request to the single-label
+            # host "testserver" (no embedded dot), so every subsequent
+            # authenticated request in this suite silently dropped its
+            # session cookie and 401'd — regardless of how the cookie
+            # was re-attached (`cookies=`, `client.cookies.update`, …).
+            # Using "localhost" instead sidesteps the whole domain-match
+            # quirk because it hits `_extract_cookie_domain`'s existing
+            # no-domain fast path, and it's a closer match for how this
+            # app is actually accessed in local dev anyway.
+            with TestClient(app, raise_server_exceptions=True, base_url="http://localhost") as tc:
                 yield tc
     finally:
         for route, ep, original in _route_patches:
@@ -140,6 +158,8 @@ def login_cookies(session: Session, client: TestClient) -> dict[str, str]:
 def _mock_grab_login(
     store_name: str = "My Store",
     merchant_id: str = "zeus_store:MERCH-001",
+    *,
+    mock_unified_profile: bool = True,
 ):
     """Standard happy-path respx mock for the 3-step Grab login +
     Step 4 user-profile fetch (mirrors `Login/login1-done.py`).
@@ -147,7 +167,32 @@ def _mock_grab_login(
     The login route derives both `merchant_id` (`user_profile.merchant_grab_id`)
     and `store_name` (`user_profile_details.first_name`) from the v2/details
     payload — the user never has to type either into the request body.
+
+    After a successful 3-step login, the route ALSO calls the
+    unified-profile endpoint (best-effort, non-fatal) to fetch the
+    merchant's address — see `app/routers/auth.py`'s
+    `merchant_address` block. respx rejects any unmocked request, so
+    every test that reaches a successful login must have this mocked
+    too, or the whole request 401s even though the address fetch is
+    designed to fail open. `mock_unified_profile=False` lets
+    `test_login_unified_profile_failure_is_non_fatal` below opt out to
+    prove the try/except actually tolerates a failure.
     """
+    if mock_unified_profile:
+        respx.get(
+            "https://api.grab.com/mex-app/troy/user-profile/v1/unified-profile"
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "grab_food_profile": {
+                            "merchant": {"address": "123 Test St"}
+                        }
+                    }
+                },
+            )
+        )
     respx.post("https://api.grab.com/grabid/v1/authnv4/login").mock(
         side_effect=[
             httpx.Response(
@@ -768,6 +813,32 @@ class TestAuthLogin:
         # merchant_id came from Grab's store-list, not the request
         assert body["store"]["merchant_id"] == "zeus_store:MERCH-001"
 
+    @respx.mock
+    def test_login_unified_profile_failure_is_non_fatal(
+        self, client: TestClient
+    ) -> None:
+        """The best-effort unified-profile (merchant address) fetch is
+        wrapped in a non-fatal try/except in `app/routers/auth.py` — a
+        failure there must NOT block login. Deliberately leave the
+        unified-profile endpoint unmocked so respx rejects it; login
+        must still return 200 with an empty store address rather than
+        surfacing a 401/500."""
+        _mock_grab_login(mock_unified_profile=False)
+
+        resp = client.post(
+            "/api/auth/login",
+            json={
+                "email": "merchant@example.com",
+                "password": "secret",
+                "xray_token": "user-supplied-xray-token-1234",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # Best-effort address fetch failed → falls back to empty string,
+        # not a crash and not a stale/garbage value.
+        assert body["store"]["address"] == ""
+
     def test_logout_clears_cookies(self, client: TestClient, login_cookies: dict) -> None:
         """POST /logout clears session and active_store_id cookies."""
         resp = client.post("/api/auth/logout", cookies=login_cookies)
@@ -971,6 +1042,117 @@ class TestItems:
         body = resp.json()
         assert body["item_id"] == "item-456"
         assert body["item_name"] == "Thit Nuong"
+
+    @respx.mock
+    def test_create_item_with_description_uses_correct_translate_params(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """Regression: item description translation must use entity="item" + text_type="description".
+
+        Without this, Grab's /menu-translations endpoint rejects the
+        call with a 4xx because ``entity="category"``/``text_type="name"``
+        (the defaults tuned for category creation) are not valid for
+        item descriptions. The unhandled ``HTTPStatusError`` propagates
+        as a raw 500 on POST /api/items when a description is supplied.
+
+        Pins down the second ``translate_name`` call's payload so the
+        next refactor can't silently break this.
+        """
+        # Translate endpoint — accept anything for this test; we only inspect the body.
+        respx.post("https://api.grab.com/food/merchant/v1/menu-translations").mock(
+            return_value=httpx.Response(200, json={"textTranslation": {"en": "Grilled Pork"}})
+        )
+        # upsert mock
+        respx.post("https://api.grab.com/food/merchant/v2/upsert-item").mock(
+            return_value=httpx.Response(200, json={"itemID": "item-789"})
+        )
+
+        resp = client.post(
+            "/api/items/",
+            json={
+                "name": "Thit Nuong",
+                "description": "Nướng than hoa",
+                "price_vnd": 50000,
+                "category_id": "cat1",
+                "image_urls": [],
+                "linked_modifier_group_ids": [],
+            },
+            cookies=login_cookies,
+        )
+        assert resp.status_code == 200, resp.text
+
+        # Find the description-translation call. There should be exactly
+        # TWO translate calls: one for the name (entity="item",
+        # text_type="name") and one for the description (entity="item",
+        # text_type="description"). Anything else means the router is
+        # calling translate_name with the wrong params.
+        translate_calls = [
+            call for call in respx.calls
+            if call.request.url.path == "/food/merchant/v1/menu-translations"
+        ]
+        assert len(translate_calls) == 2, (
+            f"expected 2 translation calls (name + description), got {len(translate_calls)}"
+        )
+
+        # Decode + classify by entity/text_type pair.
+        bodies = [json.loads(c.request.content) for c in translate_calls]
+        seen = {(b["entity"], b["textType"]) for b in bodies}
+        assert ("item", "name") in seen, (
+            f"missing name translation call; got {seen}"
+        )
+        assert ("item", "description") in seen, (
+            "description translation must use entity='item' + text_type='description' "
+            f"so Grab's translation API accepts it; got {seen}"
+        )
+
+        # The description call must NOT carry the old category defaults —
+        # that pair is what made Grab reject earlier rounds.
+        assert ("category", "name") not in seen, (
+            "description translation regressed to category/name defaults — "
+            "this is what produced the 500 Internal Server Error"
+        )
+
+    @respx.mock
+    def test_create_item_without_description_skips_translate(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """Without a description, only ONE translation call is made (the name).
+
+        Pins the ``if body.description else ""`` short-circuit so a
+        future refactor can't accidentally double-call the endpoint.
+        """
+        respx.post("https://api.grab.com/food/merchant/v1/menu-translations").mock(
+            return_value=httpx.Response(200, json={"textTranslation": {"en": "Grilled Pork"}})
+        )
+        respx.post("https://api.grab.com/food/merchant/v2/upsert-item").mock(
+            return_value=httpx.Response(200, json={"itemID": "item-no-desc"})
+        )
+
+        resp = client.post(
+            "/api/items/",
+            json={
+                "name": "Thit Nuong",
+                "description": "",
+                "price_vnd": 50000,
+                "category_id": "cat1",
+                "image_urls": [],
+                "linked_modifier_group_ids": [],
+            },
+            cookies=login_cookies,
+        )
+        assert resp.status_code == 200, resp.text
+
+        translate_calls = [
+            call for call in respx.calls
+            if call.request.url.path == "/food/merchant/v1/menu-translations"
+        ]
+        assert len(translate_calls) == 1, (
+            f"empty description should skip the description-translate call; "
+            f"got {len(translate_calls)} call(s)"
+        )
+        body = json.loads(translate_calls[0].request.content)
+        assert body["entity"] == "item"
+        assert body["textType"] == "name"
 
     @respx.mock
     def test_upload_image_returns_url(

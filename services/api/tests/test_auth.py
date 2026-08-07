@@ -10,7 +10,7 @@ import httpx
 import pytest
 import respx
 
-from app.routers.auth import _xray_jwt_age_hours
+from app.routers.auth import _login_error_to_http, _xray_jwt_age_hours
 from grab.auth import (
     ChallengeError,
     LoginError,
@@ -182,98 +182,30 @@ async def test_login_step1_rate_limited_carries_reason() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Retry behaviour — rate-limited step 1 should retry with backoff
+# Retry behaviour — step 1 rate-limiting fails fast, no server-side retry
 # ──────────────────────────────────────────────────────────────────────────
+# Server-side retry on a step-1 429 was deliberately removed — see the
+# comment block above `login_three_step` in `grab/auth.py` (~line 311):
+# the frontend's LoginErrorBanner already runs a 5-minute retry countdown
+# after a user-initiated login attempt, so a transparent server-side retry
+# here only delays an error the user is already going to see, and risks
+# the frontend's 15s watchdog firing first. The three tests that used to
+# assert retry-with-backoff (`..._retries_then_succeeds`,
+# `..._exhausts_retries`, `..._non_rate_limit_does_not_retry`) tested
+# behaviour that no longer exists and failed with
+# `ModuleNotFoundError: No module named 'grab.auth.asyncio'` (there's no
+# `asyncio.sleep` call left to monkeypatch). Replaced with a single test
+# pinning the CURRENT contract below.
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_login_step1_rate_limited_retries_then_succeeds(monkeypatch) -> None:
-    """Two consecutive 429s then a 400 → login proceeds after backoff.
-
-    Validates: (a) the retry loop kicks in on rate-limit, (b) the success
-    path is reached once Grab stops throttling, (c) the backoff helper
-    is invoked (we stub `asyncio.sleep` so the test stays fast).
-    """
-    sleep_calls: list[float] = []
-
-    async def fake_sleep(d: float) -> None:
-        sleep_calls.append(d)
-
-    monkeypatch.setattr("grab.auth.asyncio.sleep", fake_sleep)
-
-    respx.post("https://api.grab.com/grabid/v1/authnv4/login").mock(
-        side_effect=[
-            httpx.Response(
-                429,
-                json={"reason": "rate_exceeded", "message": "rate limited"},
-            ),
-            httpx.Response(
-                429,
-                json={"reason": "rate_exceeded", "message": "rate limited"},
-            ),
-            httpx.Response(
-                400,
-                json={"details": {"challengeSessionID": "challenge-abc"}},
-            ),
-            httpx.Response(
-                200,
-                json={
-                    "displayToken": "display.fake",
-                    "authnToken": "authn.fake",
-                },
-            ),
-        ]
-    )
-    respx.post(
-        "https://api.grab.com/grabid/v1/challengesession/challengeSession/verifyChallenge"
-    ).mock(return_value=httpx.Response(200, json={"ok": True}))
-
-    # Step 4: user-profile v2/details. Successful login always fetches
-    # the profile after step-3 to populate `result.profile`.
-    respx.get(
-        "https://api.grab.com/mex-app/troy/user-profile/v2/details"
-    ).mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "user_profile": {
-                    "merchant_grab_id": "zeus_store:MERCH-001",
-                    "first_name": "My Store",
-                    "user_profile_details": {"first_name": "My Store"},
-                }
-            },
-        )
-    )
-
-    result = await login_three_step("user@example.com", "password")
-    assert result.display_token == "display.fake"
-    assert result.authn_token == "authn.fake"
-
-    # Two backoff sleeps were performed (one per 429 before success).
-    assert len(sleep_calls) == 2
-    # Backoff is BASE * 2 ** (attempt-1) with ±30% jitter, so:
-    #   attempt 1 backoff: BASE * 1 = 2.0s → [1.4, 2.6]
-    #   attempt 2 backoff: BASE * 2 = 4.0s → [2.8, 5.2]
-    assert 1.4 <= sleep_calls[0] <= 2.6
-    assert 2.8 <= sleep_calls[1] <= 5.2
-    # Six calls total: two 429 retries of step1 + the successful step1 +
-    # step2 (verifyChallenge) + step3 + step4 profile fetch.
-    assert len(respx.calls) == 6
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_login_step1_rate_limited_exhausts_retries(monkeypatch) -> None:
-    """Three consecutive 429s → the last `LoginError` is surfaced."""
-    sleep_calls: list[float] = []
-
-    async def fake_sleep(d: float) -> None:
-        sleep_calls.append(d)
-
-    monkeypatch.setattr("grab.auth.asyncio.sleep", fake_sleep)
-
-    respx.post("https://api.grab.com/grabid/v1/authnv4/login").mock(
+async def test_login_step1_rate_limited_fails_fast_no_retry() -> None:
+    """A 429 at step 1 propagates immediately as a rate-limited
+    `LoginError` with exactly ONE request made to Grab — no
+    server-side retry. This is the current, deliberate contract (see
+    `grab/auth.py`'s comment block above `login_three_step`)."""
+    route = respx.post("https://api.grab.com/grabid/v1/authnv4/login").mock(
         return_value=httpx.Response(
             429,
             json={"reason": "rate_exceeded", "message": "rate limited"},
@@ -286,39 +218,9 @@ async def test_login_step1_rate_limited_exhausts_retries(monkeypatch) -> None:
     exc = info.value
     assert exc.is_rate_limited is True
     assert exc.http_status == 429
-    # Two backoffs between three attempts (we don't sleep after the
-    # final exhausted attempt).
-    assert len(sleep_calls) == 2
-    # Step 1 endpoint was hit the full number of attempts.
-    step1_calls = [
-        c for c in respx.calls
-        if c.request.url.path == "/grabid/v1/authnv4/login"
-    ]
-    assert len(step1_calls) == 3
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_login_step1_non_rate_limit_does_not_retry(monkeypatch) -> None:
-    """A 500 (server error, not rate limit) should NOT trigger backoff
-    retries — only `is_rate_limited` errors do. One attempt → raise."""
-    sleep_calls: list[float] = []
-
-    async def fake_sleep(d: float) -> None:
-        sleep_calls.append(d)
-
-    monkeypatch.setattr("grab.auth.asyncio.sleep", fake_sleep)
-
-    respx.post("https://api.grab.com/grabid/v1/authnv4/login").mock(
-        return_value=httpx.Response(500, text="server down")
-    )
-
-    with pytest.raises(LoginError) as info:
-        await login_three_step("user@example.com", "password")
-
-    assert info.value.http_status == 500
-    # No backoff — server errors aren't retried, only rate-limits.
-    assert sleep_calls == []
+    # Exactly one request — no retry loop.
+    assert route.call_count == 1
+    assert len(respx.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -510,3 +412,150 @@ def test_xray_jwt_age_hours_returns_none_for_missing_iat() -> None:
 def test_xray_jwt_age_hours_returns_none_for_none_input() -> None:
     """Defensive: None input must return None."""
     assert _xray_jwt_age_hours(None) is None
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Regression: step-2 "verify challenge payload" must NOT be misclassified as
+# grab_xray_rejected. Step 2 (verifyChallenge) never carries an x-ray header
+# — `StaticXRayProvider.get()` returns "" for step 2 — so a step-2 failure
+# can never mean Grab rejected a token we didn't send. Before the fix,
+# `is_xray_rejected`'s substring scan matched the literal token "challenge",
+# which fires on Grab's own endpoint vocabulary (verifyChallenge errors
+# routinely say "challenge") — so a wrong password sent operators off to
+# re-capture an x-ray token Grab had already accepted at step 1.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_login_error_step2_verify_challenge_payload_is_not_xray_rejected() -> None:
+    """Step 2 + reason 'invalid verify challenge payload' (Grab's flattened
+    ERROR_CODE_INVALID_VERIFY_CHALLENGE_PAYLOAD) must NOT match
+    `is_xray_rejected` — the `step == 2` guard short-circuits before the
+    'challenge' substring can misfire. This is the exact reason string that
+    caused the original misclassification."""
+    exc = LoginError(
+        "step 2 failed (HTTP 400): reason='invalid verify challenge payload'",
+        step=2,
+        grab_reason="invalid verify challenge payload",
+        http_status=400,
+    )
+    assert exc.is_xray_rejected is False
+
+
+def test_login_error_to_http_step2_verify_challenge_payload_maps_to_wrong_password() -> None:
+    """The FastAPI translation of the same step-2 error must classify as
+    `wrong_password` (not `grab_xray_rejected`), focus the `password` field,
+    and echo `grab_reason` in the response body so operators can confirm
+    which Grab classifier fired without re-reading server logs."""
+    exc = LoginError(
+        "step 2 failed (HTTP 400): reason='invalid verify challenge payload'",
+        step=2,
+        grab_reason="invalid verify challenge payload",
+        http_status=400,
+    )
+    http_exc = _login_error_to_http(exc, source="login")
+    assert http_exc.detail["code"] == "wrong_password"
+    assert http_exc.detail["fields"] == ["password"]
+    assert http_exc.detail["grab_reason"] == "invalid verify challenge payload"
+
+
+def test_login_error_step1_genuine_xray_reason_still_rejected() -> None:
+    """Regression guard: step 1 DOES carry an x-ray header, so a genuine
+    x-ray rejection there must still classify as `grab_xray_rejected`. The
+    `step == 2` guard added by the fix must not blanket-disable x-ray
+    detection for every step."""
+    exc = LoginError(
+        "step 1 failed (HTTP 401): reason='invalid xray token'",
+        step=1,
+        grab_reason="invalid xray token",
+        http_status=401,
+    )
+    assert exc.is_xray_rejected is True
+    http_exc = _login_error_to_http(exc, source="login")
+    assert http_exc.detail["code"] == "grab_xray_rejected"
+    assert http_exc.detail["fields"] == ["xray_token"]
+
+
+def test_login_error_step3_device_challenge_still_rejected() -> None:
+    """Regression guard: step 3 (commit) also carries an x-ray header, so a
+    'device challenge failed' reason there must still classify as
+    `grab_xray_rejected` — only step 2 is exempted by the fix."""
+    exc = LoginError(
+        "step 3 failed (HTTP 401): reason='device challenge failed'",
+        step=3,
+        grab_reason="device challenge failed",
+        http_status=401,
+    )
+    assert exc.is_xray_rejected is True
+    http_exc = _login_error_to_http(exc, source="login")
+    assert http_exc.detail["code"] == "grab_xray_rejected"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Precedence at step 2 — the wrong_password branch must not swallow other
+# signals that happen to co-occur at step 2 (clock drift, rate limiting,
+# upstream 5xx). `_login_error_to_http` checks clock-drift and rate-limit
+# BEFORE the password branch, so those must win even though `is_xray_rejected`
+# is now unconditionally False at step 2.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_login_error_to_http_step2_clock_drift_beats_wrong_password() -> None:
+    """Step 2 + a clock-drift reason + HTTP 429 (which would otherwise also
+    look rate-limited AND like a 401/403-style password failure) must still
+    resolve to `grab_clock_drift` — clock drift is checked first because it
+    is the most actionable diagnosis when several signals overlap."""
+    exc = LoginError(
+        "step 2 failed (HTTP 429): reason='possible device clock drift'",
+        step=2,
+        grab_reason="possible device clock drift",
+        http_status=429,
+    )
+    http_exc = _login_error_to_http(exc, source="login")
+    assert http_exc.detail["code"] == "grab_clock_drift"
+
+
+def test_login_error_to_http_step2_rate_limited_beats_wrong_password() -> None:
+    """Step 2 + HTTP 429 must resolve to `grab_rate_limited`, not
+    `wrong_password` — the rate-limit check runs before the password branch
+    even though HTTP 429 is not one of the 401/403 codes the password
+    branch itself checks."""
+    exc = LoginError(
+        "step 2 failed (HTTP 429): reason='rate_exceeded'",
+        step=2,
+        grab_reason="rate_exceeded",
+        http_status=429,
+    )
+    http_exc = _login_error_to_http(exc, source="login")
+    assert http_exc.detail["code"] == "grab_rate_limited"
+
+
+def test_login_error_to_http_step2_upstream_5xx_beats_wrong_password() -> None:
+    """Step 2 + HTTP 500 with no password-shaped reason must fall through to
+    `grab_upstream_error`, not `wrong_password` — a 500 is not in the
+    password branch's (401, 403) status set and carries no reason token, so
+    it must reach the generic server-error branch instead."""
+    exc = LoginError(
+        "step 2 failed (HTTP 500)",
+        step=2,
+        grab_reason=None,
+        http_status=500,
+    )
+    http_exc = _login_error_to_http(exc, source="login")
+    assert http_exc.detail["code"] == "grab_upstream_error"
+
+
+def test_login_error_to_http_step2_401_no_reason_still_wrong_password() -> None:
+    """The original (pre-fix) detection path must keep working: step 2 +
+    HTTP 401 with NO reason string at all still classifies as
+    `wrong_password` purely on status code — the new reason-token list is
+    additive, not a replacement for this path."""
+    exc = LoginError(
+        "step 2 failed (HTTP 401)",
+        step=2,
+        grab_reason=None,
+        http_status=401,
+    )
+    http_exc = _login_error_to_http(exc, source="login")
+    assert http_exc.detail["code"] == "wrong_password"
+    assert http_exc.detail["fields"] == ["password"]
+    assert http_exc.detail["grab_reason"] is None

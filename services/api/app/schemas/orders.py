@@ -21,6 +21,7 @@ Why a separate module:
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -328,6 +329,8 @@ class OrderDetail(BaseModel):
     )
     fare: OrderFare = Field(default_factory=OrderFare)
     times: OrderTimes = Field(default_factory=OrderTimes)
+    #: Grab's `flags.isPaxNewCustomer` — see `extract_new_customer_flag`.
+    is_new_customer: bool | None = Field(default=None, alias="isNewCustomer")
     mex_opt: OrderMexOPT = Field(
         default_factory=OrderMexOPT, alias="mexOPT"
     )
@@ -377,6 +380,88 @@ class ScheduledOrder(BaseModel):
         )
 
 
+def extract_new_customer_flag(raw: Any) -> bool | None:
+    """Read `flags.isPaxNewCustomer` — Grab's "first time here" marker.
+
+    "Pax" is Grab's word for the eater. The flag rides in the order's
+    `flags` block alongside a dozen other booleans, all of which Grab
+    serialises explicitly, so a returning customer is expected to come
+    back as `false` rather than as a missing key.
+
+    Expected, not proven: every order archived so far is `true`, so the
+    returning case has never been observed on this store. `None` is
+    therefore kept as a third state meaning "Grab didn't say" — the
+    dashboard shows no badge at all there rather than asserting
+    "khách cũ" on the strength of an absent field.
+
+    Accepts either the `{"order": {...}}` envelope or the bare order.
+    """
+    if not isinstance(raw, dict):
+        return None
+    order = raw.get("order") if isinstance(raw.get("order"), dict) else raw
+    if not isinstance(order, dict):
+        return None
+    flags = order.get("flags")
+    if not isinstance(flags, dict):
+        return None
+    value = flags.get("isPaxNewCustomer")
+    return bool(value) if isinstance(value, bool) else None
+
+
+#: A trailing fractional part: exactly one or two digits after the final
+#: separator. Vietnamese groups thousands with `.` (`"1.234.567"`), so a
+#: three-digit tail is a thousands group, not decimals — the length is what
+#: tells them apart.
+_DECIMAL_TAIL_RE = re.compile(r"[.,](\d{1,2})$")
+_NON_DIGIT_RE = re.compile(r"[^\d]")
+
+
+def parse_order_amount(raw: Any) -> float | None:
+    """`fare.totalDisplay` (`"65.000"`) as a number, or None.
+
+    None rather than 0 throughout: a total Grab didn't send, or one this
+    can't read, must not be averaged in as a zero-value order.
+
+    Two ways of being wrong that a plain strip-the-non-digits would hide:
+
+    * `"-65.000"` would come back as a positive 65.000. An order total is
+      never negative, so a minus sign means this is reading the wrong
+      field — better to report nothing than a plausible number.
+    * `"65.000,50"` would come back as 6.500.050, a hundredfold error.
+      Neither form has been seen from Grab, which is exactly why they
+      would go unnoticed.
+
+    `finance.py::_parse_locale_int` deliberately keeps the sign because it
+    also reads deduction rows; that is why it is not reused here.
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw) if raw >= 0 else None
+    if not isinstance(raw, str):
+        return None
+
+    text = raw.strip()
+    if not text:
+        return None
+    if text.lstrip("(").startswith("-"):
+        return None
+
+    fraction = 0.0
+    tail = _DECIMAL_TAIL_RE.search(text)
+    if tail:
+        fraction = int(tail.group(1)) / (100 if len(tail.group(1)) == 2 else 10)
+        text = text[: tail.start()]
+
+    digits = _NON_DIGIT_RE.sub("", text)
+    if not digits:
+        return None
+    try:
+        return float(digits) + fraction
+    except ValueError:
+        return None
+
+
 class OrderDetailLite(BaseModel):
     """Subset of ``OrderDetail`` we attach to completed/cancelled rows.
 
@@ -400,6 +485,9 @@ class OrderDetailLite(BaseModel):
     )
     fare: OrderFare = Field(default_factory=OrderFare)
     times: OrderTimes = Field(default_factory=OrderTimes)
+    #: Grab's `flags.isPaxNewCustomer`. `None` = Grab didn't say; see
+    #: `extract_new_customer_flag` for why that stays distinct from False.
+    is_new_customer: bool | None = Field(default=None, alias="isNewCustomer")
 
     model_config = {"populate_by_name": True}
 
@@ -495,6 +583,7 @@ class OrderDetailLite(BaseModel):
             },
             "fare": order.get("fare") or {},
             "times": order.get("times") or {},
+            "isNewCustomer": extract_new_customer_flag(order),
         }
         return cls.model_validate(payload)
 

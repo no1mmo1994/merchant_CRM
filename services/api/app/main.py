@@ -54,11 +54,13 @@ from app.routers import (  # noqa: F401  (routers self-register)
     customers_router,
     finance_router,
     items_router,
+    marketing_router,
     menu_router,
     modifiers_router,
     orders_router,
     partner_router,
     stores_router,
+    tiers_router,
 )
 
 # Module-level alias so tests can patch `app.main.limiter`
@@ -183,6 +185,8 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(stores_router)
     app.include_router(menu_router)
+    app.include_router(marketing_router)
+    app.include_router(tiers_router)
     app.include_router(categories_router)
     app.include_router(items_router)
     app.include_router(modifiers_router)

@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, UploadFile
 
+from app.core.grab_errors import PASSCODE_CODE, PASSCODE_MESSAGE, is_passcode_error
 from app.deps import get_grab_client, get_session, require_user
 from app.models import User
 from app.schemas import (
@@ -27,6 +28,26 @@ from grab.endpoints.items import create_or_update_item, set_item_availability, s
 log = logging.getLogger("pulseorder.items")
 
 router = APIRouter(prefix="/api/items", tags=["items"])
+
+
+def _passcode_http_error(exc: httpx.HTTPStatusError) -> HTTPException | None:
+    """The passcode refusal, when that is what Grab sent.
+
+    Item writes each had their own generic "Grab từ chối, thử lại" — which
+    is exactly the wrong advice here: retrying a write the token is not
+    allowed to make will fail forever, and the operator would never learn
+    the reason is a PIN they have to clear elsewhere.
+    """
+    if not is_passcode_error(exc.response.status_code, exc.response.text):
+        return None
+    return HTTPException(
+        status_code=403,
+        detail={
+            "code": PASSCODE_CODE,
+            "message": PASSCODE_MESSAGE,
+            "grab_status": exc.response.status_code,
+        },
+    )
 
 
 def _grab_error_message(grab_status: int, grab_body: str) -> tuple[str, str]:
@@ -59,6 +80,9 @@ def _grab_error_message(grab_status: int, grab_body: str) -> tuple[str, str]:
 
     target = parsed.get("target") or ""
     grab_msg = parsed.get("message") or ""
+
+    if is_passcode_error(grab_status, parsed):
+        return PASSCODE_MESSAGE, PASSCODE_CODE
 
     # Aspect-ratio: translate explicitly because the "already_exists" reason
     # field is misleading and users will not understand the English message.
@@ -189,19 +213,46 @@ async def create_item(
         else ""
     )
 
-    result = await create_or_update_item(
-        client,
-        name_vi=body.name,
-        name_en=name_en,
-        description_vi=body.description,
-        description_en=desc_en,
-        price_vnd=body.price_vnd,
-        category_id=body.category_id,
-        image_urls=body.image_urls,
-        webp_urls=body.image_urls,  # mirror JPGs — browser will fall back
-        webp_url=body.image_urls[0] if body.image_urls else None,
-        linked_modifier_group_ids=body.linked_modifier_group_ids,
-    )
+    try:
+        result = await create_or_update_item(
+            client,
+            name_vi=body.name,
+            name_en=name_en,
+            description_vi=body.description,
+            description_en=desc_en,
+            price_vnd=body.price_vnd,
+            category_id=body.category_id,
+            image_urls=body.image_urls,
+            webp_urls=body.image_urls,  # mirror JPGs — browser will fall back
+            webp_url=body.image_urls[0] if body.image_urls else None,
+            linked_modifier_group_ids=body.linked_modifier_group_ids,
+        )
+    except httpx.HTTPStatusError as exc:
+        log.warning(
+            "Grab create-item rejected: %s — %s",
+            exc.response.status_code, (exc.response.text or "")[:300],
+        )
+        raise (
+            _passcode_http_error(exc)
+            or HTTPException(
+                status_code=502,
+                detail={
+                    "code": "grab_rejected_create",
+                    "grab_status": exc.response.status_code,
+                    "message": "Grab từ chối tạo món. Vui lòng thử lại.",
+                    "grab_body": (exc.response.text or "")[:500],
+                },
+            )
+        ) from exc
+    except httpx.HTTPError as exc:
+        log.warning("Grab create-item transport error: %r", exc)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "grab_unreachable",
+                "message": "Không kết nối được tới Grab. Thử lại sau ít phút.",
+            },
+        ) from exc
 
     item_id: str = result.get("itemID", result.get("skuID", ""))
     write_audit_log(
@@ -367,14 +418,17 @@ async def update_item(
         )
     except httpx.HTTPStatusError as exc:
         log.warning("Grab upsert-item rejected for %s: %s", item_id, exc)
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "code": "grab_rejected_update",
-                "grab_status": exc.response.status_code,
-                "message": "Grab từ chối cập nhật món. Vui lòng thử lại.",
-                "grab_body": exc.response.text[:500],
-            },
+        raise (
+            _passcode_http_error(exc)
+            or HTTPException(
+                status_code=502,
+                detail={
+                    "code": "grab_rejected_update",
+                    "grab_status": exc.response.status_code,
+                    "message": "Grab từ chối cập nhật món. Vui lòng thử lại.",
+                    "grab_body": exc.response.text[:500],
+                },
+            )
         ) from exc
     except httpx.HTTPError as exc:
         log.warning("Grab upsert-item transport error for %s: %r", item_id, exc)
@@ -500,14 +554,17 @@ async def update_item_availability(
             ) from exc
     except httpx.HTTPStatusError as exc:
         log.warning("Grab availability toggle rejected for %s: %s", item_id, exc)
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "code": "grab_rejected_availability",
-                "grab_status": exc.response.status_code,
-                "message": "Grab từ chối đổi trạng thái bán. Vui lòng thử lại.",
-                "grab_body": exc.response.text[:500],
-            },
+        raise (
+            _passcode_http_error(exc)
+            or HTTPException(
+                status_code=502,
+                detail={
+                    "code": "grab_rejected_availability",
+                    "grab_status": exc.response.status_code,
+                    "message": "Grab từ chối đổi trạng thái bán. Vui lòng thử lại.",
+                    "grab_body": exc.response.text[:500],
+                },
+            )
         ) from exc
     except httpx.HTTPError as exc:
         log.warning("Grab availability toggle transport error for %s: %r", item_id, exc)

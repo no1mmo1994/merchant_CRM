@@ -180,9 +180,13 @@ function LockedScreen() {
  */
 function hardRedirectToLogin(
   _router: ReturnType<typeof useRouter>,
-  pathname: string | null,
+  _pathname: string | null,
 ) {
   if (typeof window === "undefined") return;
-  const next = pathname && pathname !== "/" ? `?next=${encodeURIComponent(pathname)}` : "";
+  // Read straight from `window.location` so the query string comes along
+  // — `usePathname()` drops it, which sent a merchant whose session
+  // expired on `/menu?tab=addons` back to the items tab after re-login.
+  const here = window.location.pathname + window.location.search;
+  const next = here && here !== "/" ? `?next=${encodeURIComponent(here)}` : "";
   window.location.assign(`/login${next}`);
 }

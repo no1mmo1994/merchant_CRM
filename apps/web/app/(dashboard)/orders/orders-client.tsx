@@ -26,6 +26,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { CustomerTypeBadge } from "@/components/customers/CustomerTypeBadge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -39,6 +40,7 @@ import {
 import {
   useOrderDetail,
   useOrderPollStatus,
+  useOrdersAutoRefresh,
   useOrdersHistory,
   type CancelledOrder,
   type CompletedOrder,
@@ -50,6 +52,7 @@ import {
 } from "@/lib/api/orders";
 import { ApiError } from "@/lib/api";
 import { toast } from "sonner";
+import { orderStatus } from "@/lib/order-status";
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -77,25 +80,15 @@ function formatVnd(value: number): string {
   return `${value.toLocaleString("vi-VN")} ₫`;
 }
 
-/** Translate Grab's `ORDER_IN_PREPARE` enum to a Vietnamese label. */
+/**
+ * Thin adapter onto the shared `orderStatus` map.
+ *
+ * Was a second, divergent copy: it labelled `ORDER_READY` differently
+ * from the customers page and, like that one, had no entry for
+ * `ORDER_EXECUTING`.
+ */
 function stateLabel(state: string): string {
-  switch (state) {
-    case "ORDER_IN_PREPARE":
-      return "Đang chuẩn bị";
-    case "ORDER_READY":
-      return "Sẵn sàng giao";
-    case "ORDER_PICKED_UP":
-    case "ORDER_DELIVERING":
-      return "Đang giao";
-    case "ORDER_DELIVERED":
-    case "ORDER_COMPLETED":
-      return "Hoàn tất";
-    case "ORDER_CANCELLED":
-    case "ORDER_REJECTED":
-      return "Đã hủy";
-    default:
-      return state || "—";
-  }
+  return orderStatus(state).label;
 }
 
 /** Translate Grab's delay flag into a short Vietnamese status label. */
@@ -198,6 +191,7 @@ function OrderOverviewCard({ order, onSelect }: OrderOverviewCardProps) {
           <span className="shrink-0 rounded bg-(--color-surface-2) px-1.5 py-0.5 font-mono text-xs text-(--color-muted-foreground)">
             {order.displayID || order.orderID.slice(-6)}
           </span>
+          <CustomerTypeBadge isNew={order.isNewCustomer} className="shrink-0" />
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-(--color-muted-foreground)">
           {order.eater.mobileNumber && (
@@ -362,6 +356,7 @@ function OrderDetailDialog({ orderId, onClose }: OrderDetailDialogProps) {
               <div className="flex items-center gap-2 text-sm font-semibold text-(--color-foreground)">
                 <User className="h-4 w-4" />
                 Khách hàng
+                <CustomerTypeBadge isNew={data.isNewCustomer} className="ml-auto" />
               </div>
               <div className="space-y-1 text-sm">
                 <div className="font-medium">{data.eater.name || "Khách lẻ"}</div>
@@ -601,6 +596,7 @@ function CompletedList({ rows, emptyHint }: CompletedListProps) {
                   · {r.detail.eater.name}
                 </span>
               )}
+              <CustomerTypeBadge isNew={r.detail?.isNewCustomer} />
             </div>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-(--color-muted-foreground)">
               <span className="inline-flex items-center gap-1">
@@ -652,6 +648,7 @@ function CancelledList({ rows, emptyHint }: CancelledListProps) {
                   · {r.detail.eater.name}
                 </span>
               )}
+              <CustomerTypeBadge isNew={r.detail?.isNewCustomer} />
             </div>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-(--color-muted-foreground)">
               <span className="inline-flex items-center gap-1">
@@ -773,6 +770,12 @@ const BUCKETS: BucketTab[] = [
 ];
 
 export function OrdersClient() {
+  // Refresh the order list whenever the backend's 30s cron reports a new
+  // poll. Without it this page never updated on its own — an order that
+  // went out for delivery and then completed kept showing whatever state
+  // it had when the tab was opened.
+  useOrdersAutoRefresh();
+
   const initial = React.useMemo(defaultRange, []);
   const [fromDate, setFromDate] = React.useState<string>(initial.from);
   const [toDate, setToDate] = React.useState<string>(initial.to);

@@ -3,11 +3,11 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  BarChart3,
+  Award,
   ClipboardList,
   DollarSign,
   LayoutDashboard,
-  ListChecks,
+  Megaphone,
   Settings,
   ShoppingBag,
   Users,
@@ -41,12 +41,14 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { href: "/dashboard", label: "Tổng quan", icon: LayoutDashboard },
+  // "Tùy chọn thêm" is now a tab inside Thực đơn, not its own entry —
+  // menu building lives in one place.
   { href: "/menu", label: "Thực đơn", icon: ShoppingBag, matchPrefix: true },
-  { href: "/modifiers", label: "Tùy chọn thêm", icon: ListChecks },
   { href: "/orders", label: "Đơn hàng", icon: ClipboardList },
   { href: "/finance", label: "Tài chính", icon: DollarSign },
+  { href: "/marketing", label: "Tiếp thị", icon: Megaphone },
   // Stores page removed — login creates exactly one store per account.
-  { href: "/analytics", label: "Phân tích", icon: BarChart3 },
+  { href: "/golden-apron", label: "Tạp Dề Vàng", icon: Award },
   { href: "/customers", label: "Khách hàng & Nguồn", icon: Users },
 ];
 

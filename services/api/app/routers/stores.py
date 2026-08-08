@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlmodel import Session
 
 from app.core.security import decrypt_token
+from app.core.grab_errors import PASSCODE_CODE, PASSCODE_MESSAGE, is_passcode_error
 from app.deps import get_session, require_user
 from app.models import Store
 from app.schemas import (
@@ -655,6 +657,31 @@ async def update_store_status(
                     is_unpause=body.unpause,
                     current_runtime=body.current_runtime,
                 )
+    except httpx.HTTPStatusError as exc:
+        log.warning(
+            "store status update failed for %s kind=%s unpause=%s: %s — %s",
+            merchant_id, body.kind, body.unpause,
+            exc.response.status_code, (exc.response.text or "")[:300],
+        )
+        # Whether Grab gates store pause/busy behind the passcode the way
+        # it now gates every menu write is unmeasured — toggling a live
+        # store to find out is not a probe worth running. Recognising it
+        # costs nothing and beats the alternative, which was a raw Python
+        # exception repr shown to the operator in place of a reason.
+        if is_passcode_error(exc.response.status_code, exc.response.text):
+            raise HTTPException(
+                status_code=403,
+                detail={"code": PASSCODE_CODE, "message": PASSCODE_MESSAGE},
+            ) from exc
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "grab_rejected_store_status",
+                "grab_status": exc.response.status_code,
+                "message": "Grab từ chối đổi trạng thái cửa hàng. Thử lại sau ít phút.",
+                "grab_body": (exc.response.text or "")[:500],
+            },
+        ) from exc
     except Exception as exc:  # noqa: BLE001 — surface raw Grab failure
         log.warning(
             "store status update failed for %s kind=%s unpause=%s: %s",
@@ -663,7 +690,13 @@ async def update_store_status(
             body.unpause,
             exc,
         )
-        raise HTTPException(status_code=502, detail=f"Grab từ chối: {exc}") from exc
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "grab_unreachable",
+                "message": "Không kết nối được tới Grab. Thử lại sau ít phút.",
+            },
+        ) from exc
 
     # Audit log — tamper-evident record of every state change.
     from app.deps import write_audit_log

@@ -31,12 +31,18 @@ from sqlmodel import Session
 from app.deps import get_session, require_user
 from app.models import OrderArchive, Store, User
 from app.schemas.customers import (
+    CustomerMix,
+    CustomerMixBucket,
     CustomerSummary,
     CustomersOverviewResponse,
     OrderSummary,
     SourceSummary,
 )
-from app.schemas.orders import OrderDetailLite
+from app.schemas.orders import (
+    OrderDetailLite,
+    extract_new_customer_flag,
+    parse_order_amount,
+)
 
 log = logging.getLogger("pulseorder.customers")
 
@@ -97,6 +103,95 @@ def _normalize_total(raw: str) -> str:
     return raw if isinstance(raw, str) else ""
 
 
+def _order_created_at(payload: dict[str, Any]) -> datetime | None:
+    """Grab's own `times.createdAt` — when the order was actually placed.
+
+    Not the same thing as `OrderArchive.last_seen_at`, which records when
+    this dashboard last polled. The cron stamps every row it touches in
+    one tick with a single shared timestamp, so two orders hours apart
+    routinely land on the identical `last_seen_at` — both rows in this
+    store's archive from the 08-08 sweep did, while the orders themselves
+    were placed twelve hours apart.
+
+    That matters because "the customer's latest order" decides which
+    order's new-customer flag the customer card reports. Ranking on
+    poll time would let a returning customer read as new depending on
+    nothing more than row iteration order.
+    """
+    order = payload.get("order") if isinstance(payload.get("order"), dict) else payload
+    if not isinstance(order, dict):
+        return None
+    times = order.get("times")
+    if not isinstance(times, dict):
+        return None
+    raw = times.get("createdAt")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        # Grab sends `2026-08-08T02:31:20Z`; `fromisoformat` wants an
+        # offset it recognises.
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _is_cancelled(state: str) -> bool:
+    """True for any state Grab uses to mean the order didn't happen.
+
+    Substring rather than an exact set: the archive holds both
+    ``CANCELLED`` and ``ORDER_CANCELLED`` depending on which sweep wrote
+    the row, and a state that means cancelled must never be counted as
+    revenue because it didn't match a literal.
+    """
+    return "CANCEL" in (state or "").upper()
+
+
+def _mix_key(flag: bool | None) -> str:
+    """Which slice an order belongs to. `None` is its own slice."""
+    if flag is True:
+        return "new"
+    if flag is False:
+        return "returning"
+    return "unknown"
+
+
+def _build_customer_mix(
+    tallies: dict[str, dict[str, Any]],
+) -> CustomerMix:
+    """Turn the per-slice tallies collected during the scan into the mix."""
+    buckets: dict[str, CustomerMixBucket] = {}
+    for key in ("new", "returning", "unknown"):
+        t = tallies[key]
+        earning = t["earning_orders"]
+        buckets[key] = CustomerMixBucket(
+            orders=t["orders"],
+            cancelledOrders=t["cancelled"],
+            customers=len(t["phones"]),
+            revenueVnd=t["revenue"],
+            # Averaged over the orders that actually contributed revenue:
+            # cancellations are out, and so is any order whose total we
+            # couldn't read. Both would otherwise pull the figure down as
+            # if customers had spent less.
+            avgOrderValue=(t["revenue"] / earning) if earning > 0 else 0.0,
+        )
+
+    known_orders = buckets["new"].orders + buckets["returning"].orders
+    known_revenue = buckets["new"].revenue_vnd + buckets["returning"].revenue_vnd
+
+    return CustomerMix(
+        new=buckets["new"],
+        returning=buckets["returning"],
+        unknown=buckets["unknown"],
+        # None, not 0.0 — "no orders yet" is not "0% from new customers".
+        newOrderShare=(
+            buckets["new"].orders / known_orders if known_orders > 0 else None
+        ),
+        newRevenueShare=(
+            buckets["new"].revenue_vnd / known_revenue if known_revenue > 0 else None
+        ),
+    )
+
+
 # ── endpoint ─────────────────────────────────────────────────────────────────
 
 
@@ -148,9 +243,24 @@ def get_customers_overview(
 
     # ── customers bucket (group by eater.mobileNumber) ─────────────────────
     customers_by_phone: dict[str, CustomerSummary] = {}
+    # Which order currently owns each customer's headline — see the
+    # `recency` tuple built per row below.
+    customer_recency: dict[str, tuple[datetime, datetime, int]] = {}
     # Track distinct customers per source as a side-effect of the
     # same scan — cheaper than a second pass.
     source_phone_seen: dict[str, set[str]] = {}
+    # New / returning / unknown tallies, filled in the same pass for the
+    # same reason.
+    mix_tallies: dict[str, dict[str, Any]] = {
+        key: {
+            "orders": 0,
+            "cancelled": 0,
+            "earning_orders": 0,
+            "revenue": 0.0,
+            "phones": set(),
+        }
+        for key in ("new", "returning", "unknown")
+    }
 
     for row in rows:
         merchant_id = row.merchant_id or ""
@@ -179,44 +289,69 @@ def get_customers_overview(
         if isinstance(fare, dict):
             total = _normalize_total(str(fare.get("totalDisplay") or ""))
 
+        is_new = extract_new_customer_flag(payload)
+
+        tally = mix_tallies[_mix_key(is_new)]
+        tally["orders"] += 1
+        tally["phones"].add(phone_key)
+        if _is_cancelled(row.state):
+            tally["cancelled"] += 1
+        else:
+            amount = parse_order_amount(total)
+            if amount is not None:
+                tally["revenue"] += amount
+                # Counted separately from `orders` so an order whose total
+                # we couldn't read stays out of the average as well as out
+                # of the revenue. Leaving it in the denominator would be
+                # the same as treating its total as zero — exactly what
+                # `parse_order_amount` returns None to prevent.
+                tally["earning_orders"] += 1
+
+        # Rank on when the ORDER was placed, falling back to when we
+        # polled, then the row id so the winner is never decided by the
+        # order rows happen to come back from SQLite.
+        #
+        # This used to compare `last_seen_at` against itself twice
+        # (`(d, d)`), which is no tie-break at all — and ties are the norm,
+        # not the exception: the cron stamps every row in one sweep with a
+        # single timestamp, and both 08-08 rows in this store's archive
+        # carry the identical `last_seen_at` while the orders were placed
+        # twelve hours apart. The losing side of that coin toss decides
+        # which order's new-customer flag the card reports, so a returning
+        # customer could read as new for no reason at all.
+        recency = (
+            _order_created_at(payload) or row.last_seen_at or datetime.min,
+            row.last_seen_at or datetime.min,
+            row.id or 0,
+        )
+
         existing = customers_by_phone.get(phone_key)
         if existing is None:
-            customers_by_phone[phone_key] = CustomerSummary(
+            summary = CustomerSummary(
                 mobileNumber=phone,
                 name=str(eater.get("name") or ""),
                 address=str(eater.get("address") or ""),
                 orderCount=1,
                 totalDisplay=total,
+                isNewCustomer=is_new,
                 lastOrderAt=row.last_seen_at,
                 lastState=row.state,
             )
+            customers_by_phone[phone_key] = summary
+            customer_recency[phone_key] = recency
         else:
             existing.order_count += 1
-            # Move the "last order" pointer forward — the customer
-            # card headline shows the most-recent order's state,
-            # total, and timestamp.
-            #
-            # The tie-break uses ``>=`` on ``last_seen_at`` AND
-            # ``updated_at`` so that a re-archived row at the same
-            # ``last_seen_at`` second (common — the cron can re-archive
-            # the same order on the same second with a different
-            # ``state`` / ``totalDisplay``) still replaces the older
-            # total/state. Strict ``>`` would pin the customer card
-            # to the *first* sweep's state even though the archive
-            # row itself has moved on.
-            def _recency_key(d) -> tuple:
-                # Module-level ``datetime`` (imported at top of file) is
-                # the sentinel so the comparison identity is stable.
-                return (d or datetime.min, d or datetime.min)
-
-            if row.last_seen_at and (
-                existing.last_order_at is None
-                or _recency_key(row.last_seen_at) >= _recency_key(existing.last_order_at)
-            ):
+            if recency >= customer_recency[phone_key]:
+                customer_recency[phone_key] = recency
+                # Everything on the headline comes from the same winning
+                # order, `total` included even when it's empty. Keeping a
+                # previous order's total next to this one's state and
+                # new-customer flag would make the card quietly describe
+                # two different orders at once.
                 existing.last_order_at = row.last_seen_at
                 existing.last_state = row.state
-                if total:
-                    existing.total_display = total
+                existing.is_new_customer = is_new
+                existing.total_display = total
 
     # ── sources bucket (group by merchant_id) ───────────────────────────────
     source_counts: dict[str, int] = {}
@@ -316,4 +451,5 @@ def get_customers_overview(
         customers=customers,
         sources=sources,
         orders=orders,
+        customerMix=_build_customer_mix(mix_tallies),
     )

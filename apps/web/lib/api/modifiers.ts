@@ -219,7 +219,7 @@ export function useCreateModifierGroup() {
  * Edit an existing group.
  *
  * NOTE for callers: invalidating `MODIFIER_GROUPS_KEY` is not enough to
- * refresh the /modifiers page. That page deliberately bypasses this
+ * refresh the add-ons tab of /menu. That view deliberately bypasses this
  * query — it needs the `partial` / `source` fields that
  * `useModifierGroups` discards — and keeps its own `reload()`. Call that
  * too, the way `ModifierEditor` does via `onCreated`. The invalidation
@@ -246,7 +246,7 @@ export function useDeleteModifierGroup() {
 /**
  * Set which menu items offer a group. Invalidates the menu too — link
  * state lives on the items, so a stale menu would show the old picture.
- * As with the other mutations here, the /modifiers page keeps its own
+ * As with the other mutations here, the add-ons tab keeps its own
  * reload() and needs calling separately.
  */
 export function useSetGroupItems() {

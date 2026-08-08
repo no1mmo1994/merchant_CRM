@@ -7,6 +7,7 @@ import {
   CalendarRange,
   Coins,
   DollarSign,
+  Megaphone,
   Receipt,
   RefreshCw,
   Wallet,
@@ -185,8 +186,12 @@ function MetricGroupRow({ group }: MetricGroupProps) {
             key={`${group.label}-${idx}`}
             className="flex items-center justify-between rounded bg-(--color-surface-2)/40 px-2 py-1"
           >
-            <span className="text-[11px] uppercase tracking-wide">
-              #{idx + 1}
+            {/* Grab's own label for the row. A group can hold several
+                unrelated costs — the platform commission and the ad fee
+                both land in "Khấu trừ" — and "#1 / #2" told the operator
+                nothing about which was which. */}
+            <span className="truncate pr-2 text-[11px]">
+              {v.name && v.name !== group.label ? v.name : `#${idx + 1}`}
             </span>
             <span className="font-mono text-(--color-foreground)">
               {v.display && v.display.trim().length > 0
@@ -264,6 +269,7 @@ export function FinanceClient() {
   // every element failed `> -1`. Read the first slot instead.
   const firstValue = (label: string) =>
     metricsByLabel.get(label)?.values[0] ?? null;
+
 
   return (
     <div className="space-y-6 p-6">
@@ -411,11 +417,70 @@ function SummarySection({
   metricsByLabel: Map<string, FinancialMetricGroup>;
   firstValue: (label: string) => FinancialMetricGroup["values"][number] | null;
 }) {
+  // "Khấu trừ" is a bucket, not a single number: the platform commission
+  // and the advertising fee are separate rows in it. The card read only
+  // the first, so a store paying for ads saw a deduction total short by
+  // exactly the ad spend.
+  const sumValue = (
+    label: string,
+  ): FinancialMetricGroup["values"][number] | null => {
+    const values = metricsByLabel.get(label)?.values ?? [];
+    if (values.length === 0) return null;
+    if (values.length === 1) return values[0];
+    return {
+      display: "",
+      value_minor: values.reduce((acc, v) => acc + v.value_minor, 0),
+    };
+  };
+
+  // How many separate costs that bucket holds, so the hint can say so
+  // rather than presenting a sum as though it were a single fee.
+  const deductionRows = metricsByLabel.get("Khấu trừ")?.values.length ?? 0;
+
+  /**
+   * What the store spent on Grab advertising.
+   *
+   * There is no dedicated field for it. Grab files the ad spend as one
+   * row inside the deduction bucket — the backend keeps each row's own
+   * label, so it arrives as a "Khấu trừ" value named "Phí quảng cáo".
+   * Depending on how Grab nests the accordion it can also surface as a
+   * group of its own, so both are searched.
+   *
+   * Summed rather than first-match: a period can carry more than one
+   * marketing line (campaign fee and net marketing fee, for instance).
+   */
+  const marketingValue = (): FinancialMetricGroup["values"][number] | null => {
+    const isMarketing = (s: string) => {
+      const t = s.toLowerCase();
+      return (
+        t.includes("quảng cáo") ||
+        t.includes("tiếp thị") ||
+        t.includes("marketing") ||
+        t.includes("advertis")
+      );
+    };
+    let total = 0;
+    let found = false;
+    for (const group of metrics) {
+      const groupIsMarketing = isMarketing(group.label);
+      for (const v of group.values) {
+        if (groupIsMarketing || isMarketing(v.name ?? "")) {
+          total += v.value_minor;
+          found = true;
+        }
+      }
+    }
+    return found ? { display: "", value_minor: total } : null;
+  };
+  const marketing = marketingValue();
+
   return (
     <div className="space-y-6">
-      {/* Top KPI row — uses the canonical 3-col grid pattern from the
-          placeholder, but now backed by real numbers.  Order mirrors
-          the merchant's mental model: gross → net → deduction. */}
+      {/* Row 1 — the money story, in the order the merchant thinks about
+          it: what came in, what is left after Grab's cut, what actually
+          lands in the bank. "Thu nhập ròng" was previously buried at the
+          end of the fees row; it is the number the operator opens this
+          page for, so it belongs here. */}
       <div className="grid gap-4 md:grid-cols-3">
         <MetricCard
           icon={<DollarSign className="h-4 w-4" />}
@@ -428,26 +493,44 @@ function SummarySection({
           icon={<Receipt className="h-4 w-4" />}
           label="Doanh thu ròng"
           value={isLoading ? "—" : formatBalance(firstValue("Doanh thu ròng"))}
-          hint={isLoading ? "Đang tải…" : "Doanh thu sau khi trừ phí nền tảng và khấu trừ khác."}
+          hint={isLoading ? "Đang tải…" : "Sau khi trừ phí nền tảng và khấu trừ khác."}
         />
+        {/* Was "Thu nhập ròng", which Grab never returns for this store —
+            the card read "— đ" on every report. Marketing spend is the
+            one deduction the merchant actually controls, and it was
+            invisible: buried as an unnamed second row inside Khấu trừ.
+            Labelled as already-counted so nobody adds it to Khấu trừ
+            again. */}
         <MetricCard
-          icon={<Wallet className="h-4 w-4" />}
-          label="Số dư doanh thu (Sales Balance)"
-          value={isLoading ? "—" : formatBalance(data?.sales_balance)}
-          hint={isLoading ? "Đang tải…" : "Số dư doanh thu hiện có trên Grab."}
+          icon={<Megaphone className="h-4 w-4" />}
+          label="Chi phí tiếp thị"
+          value={isLoading ? "—" : marketing ? formatBalance(marketing) : "—"}
+          tone="warning"
+          hint={
+            isLoading
+              ? "Đang tải…"
+              : marketing
+                ? "Phí quảng cáo Grab — đã nằm trong Khấu trừ."
+                : "Kỳ này không có chi phí quảng cáo."
+          }
         />
       </div>
 
-      {/* Second KPI row — deductions + taxes + take-home.  Kept as its
-          own row so the operator can see the tax breakdown without
-          scrolling past the gross/net numbers. */}
-      <div className="grid gap-4 md:grid-cols-4">
+      {/* Row 2 — what was taken off. Khấu trừ sums its rows: it holds the
+          platform commission AND the advertising fee. */}
+      <div className="grid gap-4 md:grid-cols-3">
         <MetricCard
           icon={<Banknote className="h-4 w-4" />}
           label="Khấu trừ"
-          value={isLoading ? "—" : formatBalance(firstValue("Khấu trừ"))}
+          value={isLoading ? "—" : formatBalance(sumValue("Khấu trừ"))}
           tone="warning"
-          hint={isLoading ? "Đang tải…" : "Phí nền tảng + chiết khấu."}
+          hint={
+            isLoading
+              ? "Đang tải…"
+              : deductionRows > 1
+                ? `Phí nền tảng + quảng cáo + chiết khấu (${deductionRows} khoản).`
+                : "Phí nền tảng + chiết khấu."
+          }
         />
         <MetricCard
           icon={<Banknote className="h-4 w-4" />}
@@ -463,41 +546,52 @@ function SummarySection({
           tone="warning"
           hint={isLoading ? "Đang tải…" : "Thuế thu nhập cá nhân."}
         />
-        <MetricCard
-          icon={<DollarSign className="h-4 w-4" />}
-          label="Thu nhập ròng"
-          value={isLoading ? "—" : formatBalance(firstValue("Thu nhập ròng"))}
-          tone="success"
-          hint={isLoading ? "Đang tải…" : "Số tiền cuối cùng merchant nhận."}
-        />
       </div>
 
-      {/* Earnings balance (separate card; merchant cares about this
-          number independently of the gross / net numbers above). */}
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card className="border-(--color-border)">
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">
-              Số dư thu nhập (Earnings Balance)
-            </CardTitle>
-            <Wallet className="h-4 w-4 text-(--color-muted-foreground)" />
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <Skeleton className="h-8 w-40" />
-            ) : (
-              <div className="text-2xl font-bold text-emerald-700">
-                {formatBalance(data?.earnings_balance)}
+      {/* Row 3 — the two balances Grab holds. They used to be a KPI card
+          and a near-empty half-width card; both are single numbers the
+          operator only glances at, so they share one compact strip. */}
+      <Card className="border-(--color-border)">
+        <CardContent className="grid gap-4 p-4 sm:grid-cols-2">
+          {[
+            {
+              title: "Số dư doanh thu",
+              value: data?.sales_balance,
+              hint: "Số dư doanh thu hiện có trên Grab.",
+              accent: "text-(--color-foreground)",
+            },
+            {
+              title: "Số dư thu nhập",
+              value: data?.earnings_balance,
+              hint: "Số dư khả dụng để yêu cầu rút tiền.",
+              accent: "text-emerald-600",
+            },
+          ].map((b) => (
+            <div key={b.title} className="flex items-center gap-3">
+              <Wallet className="h-4 w-4 shrink-0 text-(--color-muted-foreground)" />
+              <div className="min-w-0">
+                <div className="text-xs text-(--color-muted-foreground)">
+                  {b.title}
+                </div>
+                {isLoading ? (
+                  <Skeleton className="mt-1 h-6 w-32" />
+                ) : (
+                  <div className={`text-xl font-bold ${b.accent}`}>
+                    {formatBalance(b.value)}
+                  </div>
+                )}
+                <p className="text-[11px] text-(--color-muted-foreground)">
+                  {b.hint}
+                </p>
               </div>
-            )}
-            <p className="mt-1 text-xs text-(--color-muted-foreground)">
-              Số dư khả dụng để yêu cầu rút tiền.
-            </p>
-          </CardContent>
-        </Card>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
 
-        {/* Drill-down card — exhaustive list of every label Grab
-            returned, not just the canonical six. */}
+      {/* Row 4 — full width. It lists every label Grab returned, several
+          of them with multiple rows; at half width the numbers wrapped. */}
+      <div className="grid gap-4">
         <Card className="border-(--color-border)">
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Chi tiết báo cáo</CardTitle>

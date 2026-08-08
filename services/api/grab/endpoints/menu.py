@@ -30,6 +30,44 @@ def iter_menu_categories(menu: dict[str, Any]) -> Iterator[dict[str, Any]]:
                 yield cat
 
 
+def category_section_map(menu: dict[str, Any]) -> dict[str, str]:
+    """Map each category id to the id of the section that holds it.
+
+    Categories in the flat `categories` list belong to no section and map
+    to `""`, which is what Grab's sort endpoint expects for a menu that
+    has none — the shape `Menu/danhmuc/get_sapxepdanhmuc.py` was captured
+    against, and the shape this store still has.
+
+    A menu organised into `sections` is the other half of the split
+    `iter_menu_categories` exists for. Sending `sectionID: ""` for those
+    categories tells Grab to reorder a section that does not exist, which
+    is exactly the kind of difference that makes one account's reorder
+    work and another's fail while the code looks account-agnostic.
+    """
+    if not isinstance(menu, dict):
+        # Grab answering `null` or a bare list would otherwise raise
+        # `AttributeError` here — an uncaught 500 on the very path added to
+        # stop reorders returning 500.
+        return {}
+
+    mapping: dict[str, str] = {}
+    for cat in menu.get("categories") or []:
+        if isinstance(cat, dict):
+            cat_id = str(cat.get("categoryID") or cat.get("id") or "")
+            if cat_id:
+                mapping[cat_id] = ""
+    for section in menu.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        section_id = str(section.get("sectionID") or section.get("id") or "")
+        for cat in section.get("categories") or []:
+            if isinstance(cat, dict):
+                cat_id = str(cat.get("categoryID") or cat.get("id") or "")
+                if cat_id:
+                    mapping[cat_id] = section_id
+    return mapping
+
+
 def find_item_with_category(
     menu: dict[str, Any],
     item_id: str,

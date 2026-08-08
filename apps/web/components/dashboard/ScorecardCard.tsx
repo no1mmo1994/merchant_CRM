@@ -1,34 +1,43 @@
 "use client";
 
 import * as React from "react";
-import { Award, Star, AlertCircle } from "lucide-react";
+import { Award, Star, AlertCircle, BadgeCheck } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import Link from "next/link";
 import { useUIStore } from "@/lib/stores/ui-store";
 import { useAuthStore } from "@/lib/stores/auth-store";
-import { useStoreInfo, useStores } from "@/lib/api/stores";
+import { useStores } from "@/lib/api/stores";
+import { useGoldenApronSummary } from "@/lib/api/golden-apron";
 import { useStoreConnectionStatus } from "@/hooks/useStoreConnectionStatus";
 import { fadeUp } from "@/lib/animations/variants";
 import { motion } from "framer-motion";
+import { cn } from "@/lib/utils";
 
 /**
- * Scorecard tile — renders the active store's Grab scorecard (rating
- * title + tier + numeric score). Wired to
- * `GET /api/stores/{merchant_id}/info` via `useStoreInfo`. The full
- * payload is fetched so we can also surface scoreRank / desc when
- * Grab provides them.
+ * Store standing at the top of the dashboard: stars, tier, apron title.
  *
- * Shown at the top of the dashboard grid, above the placeholder KPIs.
+ * Reads `GET /api/golden-apron/summary`, not Grab's `scorecard` endpoint.
+ * That endpoint's `score` is store-profile completeness out of 100 — its
+ * own `desc` is about having the information customers look for, and it
+ * sets `shouldShowScore: false`. This card used to render it as
+ * "100.0 / 5", which is wrong twice over: wrong scale, and not a rating
+ * at all. The star rating lives in the feedback service; the tier lives
+ * in the tier page.
  *
- * Bug fix: when the backend reports `ok=false` for the scorecard
- * section (typical: 401/403 because the auth token is dead), we now
- * inline a "Lỗi AuthToken" banner pointing to /settings, instead of
- * silently rendering three "—" placeholders (which is what the user
- * reported and is exactly why "chưa giải quyết được lấy các thông số
- * đánh giá cửa hàng").
+ * The apron title is derived from the current tier server-side, so it
+ * follows a promotion on the next refetch rather than being stored
+ * anywhere that could go stale.
  */
+
+/** Tier tints, warmest at the top of the ladder — matches /golden-apron. */
+const TIER_TONE: Record<string, string> = {
+  "Cơ Bản": "text-(--color-muted-foreground)",
+  Bạc: "text-slate-400",
+  Vàng: "text-amber-500",
+};
+
 export function ScorecardCard() {
   const activeStoreId = useUIStore((s) => s.activeStoreId);
   const authStores = useAuthStore((s) => s.stores);
@@ -37,21 +46,20 @@ export function ScorecardCard() {
   const activeStore = stores.find((s) => String(s.id) === activeStoreId) ?? stores[0];
   const merchantId = activeStore?.merchant_id ?? null;
 
-  const { data, isLoading, isError } = useStoreInfo(merchantId);
+  const { data, isLoading, isError, error } = useGoldenApronSummary(merchantId);
   const { status: connectionStatus } = useStoreConnectionStatus();
-  const section = data?.scorecard;
-  const raw = section?.data;
 
-  const tokenIsDead =
-    isError ||
-    connectionStatus === "authtoken_error" ||
-    (section && section.ok === false && (section.error ?? "").length > 0);
+  // Only `useStoreConnectionStatus` gets to call a token dead — it debounces
+  // over consecutive failures for exactly that purpose. This query can't:
+  // the backend maps every Grab failure (500, 503, 429, timeout) to a 502,
+  // so keying the banner off `isError` would tell the operator to go and
+  // refresh a perfectly good token because Grab hiccuped twice.
+  const tokenIsDead = connectionStatus === "authtoken_error";
+  const loadFailed = isError && !tokenIsDead;
+  const tierTone = TIER_TONE[data?.currentTier ?? ""] ?? "text-(--color-brand)";
 
   return (
-    <motion.div
-      variants={fadeUp}
-      className="lg:col-span-12"
-    >
+    <motion.div variants={fadeUp} className="lg:col-span-12">
       <Card className="border-(--color-border)">
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
@@ -66,8 +74,7 @@ export function ScorecardCard() {
             )}
           </div>
           <CardDescription>
-            Hạng + điểm đánh giá thời gian thực từ endpoint{" "}
-            <span className="font-mono">scorecard</span> của Grab.
+            Số sao, hạng và danh hiệu Tạp Dề — cập nhật theo dữ liệu Grab.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -98,7 +105,8 @@ export function ScorecardCard() {
                   </Badge>
                 </div>
                 <p className="text-amber-700/90 dark:text-amber-200/80">
-                  Không thể tải bảng đánh giá từ Grab do auth token không còn hiệu lực. Vui lòng làm mới token tại trang Cài đặt.
+                  Không thể tải bảng đánh giá từ Grab do auth token không còn
+                  hiệu lực. Vui lòng làm mới token tại trang Cài đặt.
                 </p>
                 <Link
                   href="/settings"
@@ -110,43 +118,70 @@ export function ScorecardCard() {
             </div>
           )}
 
-          {merchantId && !tokenIsDead && data && !activeStore && (
-            <div className="text-sm text-(--color-muted-foreground)">
-              Chưa chọn cửa hàng — vui lòng chọn một cửa hàng từ thanh trên cùng.
+          {merchantId && loadFailed && (
+            <div className="rounded-lg border border-(--color-border) bg-(--color-surface-2) p-3 text-sm text-(--color-muted-foreground)">
+              {error instanceof Error
+                ? error.message
+                : "Không tải được bảng đánh giá từ Grab. Thử lại sau ít phút."}
             </div>
           )}
 
-          {merchantId && !tokenIsDead && raw && (
+          {merchantId && !tokenIsDead && !loadFailed && data && (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <Stat
                 icon={<Star className="h-4 w-4" />}
-                label="Điểm"
-                value={
-                  typeof raw.score === "number"
-                    ? `${raw.score.toFixed(1)} / 5`
-                    : raw.score ?? "—"
+                label="Số sao đánh giá"
+                value={data.rating === null ? "—" : `${data.rating.toFixed(1)} / 5`}
+                hint={
+                  data.ratingCount === null
+                    ? undefined
+                    : `${data.ratingCount} lượt đánh giá`
                 }
               />
               <Stat
                 icon={<Award className="h-4 w-4" />}
                 label="Hạng"
-                value={raw.scoreRank ?? "—"}
+                value={data.currentTier || "—"}
+                valueClassName={tierTone}
+                hint={
+                  data.totalCount > 0
+                    ? `Đạt ${data.achievedCount}/${data.totalCount} điều kiện`
+                    : undefined
+                }
               />
               <Stat
-                icon={<Award className="h-4 w-4" />}
+                icon={<BadgeCheck className="h-4 w-4" />}
                 label="Danh hiệu"
-                value={raw.title ?? "—"}
+                // Empty when Grab didn't state a tier — a title invented
+                // over a blank tier would claim a standing nothing backs.
+                value={data.apronTitle || "—"}
+                valueClassName={tierTone}
+                hint={
+                  <Link href="/golden-apron" className="hover:underline">
+                    Xem điều kiện lên hạng →
+                  </Link>
+                }
               />
-              {raw.desc && (
+
+              {data.profileDesc && (
                 <div className="col-span-full rounded-md border border-dashed border-(--color-border) p-3 text-sm text-(--color-muted-foreground)">
-                  {raw.desc}
+                  {data.profileDesc}
+                  {data.profileScore !== null && (
+                    <>
+                      {" "}
+                      <span className="font-mono text-xs">
+                        (điểm hoàn thiện thông tin: {data.profileScore}/100)
+                      </span>
+                    </>
+                  )}
                 </div>
               )}
-            </div>
-          )}
-          {merchantId && !tokenIsDead && raw === null && section?.error && !tokenIsDead && (
-            <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-600 dark:text-amber-400">
-              Grab không trả về bảng đánh giá: {section.error}
+
+              {data.warnings.length > 0 && (
+                <div className="col-span-full rounded-md border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-600 dark:text-amber-400">
+                  {data.warnings.join(" ")}
+                </div>
+              )}
             </div>
           )}
         </CardContent>
@@ -159,10 +194,14 @@ function Stat({
   icon,
   label,
   value,
+  hint,
+  valueClassName,
 }: {
   icon: React.ReactNode;
   label: string;
   value: React.ReactNode;
+  hint?: React.ReactNode;
+  valueClassName?: string;
 }) {
   return (
     <div className="rounded-lg border border-(--color-border) bg-(--color-surface-2) p-3">
@@ -170,7 +209,12 @@ function Stat({
         {icon}
         {label}
       </div>
-      <div className="mt-1 text-lg font-semibold text-(--color-foreground)">{value}</div>
+      <div className={cn("mt-1 text-lg font-semibold text-(--color-foreground)", valueClassName)}>
+        {value}
+      </div>
+      {hint && (
+        <div className="mt-0.5 text-xs text-(--color-muted-foreground)">{hint}</div>
+      )}
     </div>
   );
 }

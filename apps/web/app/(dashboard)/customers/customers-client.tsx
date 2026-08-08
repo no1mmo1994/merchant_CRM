@@ -19,9 +19,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { CustomerMixCard } from "@/components/customers/CustomerMixCard";
+import { CustomerTypeBadge } from "@/components/customers/CustomerTypeBadge";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useCustomersOverview } from "@/lib/api/customers";
+import { orderStatus } from "@/lib/order-status";
 import type {
   CustomerSummary,
   OrderItem,
@@ -73,18 +76,16 @@ function formatTimestamp(value: string | null | undefined): string {
   return `${hh}:${mm} ${dd}/${mo}`;
 }
 
-/** Map Grab's raw state to a Vietnamese label + badge variant. */
+/**
+ * Thin adapter onto the shared `orderStatus` map.
+ *
+ * This file used to carry its own copy, which had already drifted from
+ * the one in orders-client and knew nothing about `ORDER_EXECUTING` —
+ * so a delivering order rendered its bare enum here.
+ */
 function stateBadge(state: string | undefined): { label: string; variant: "default" | "secondary" | "destructive" | "outline" } {
-  const s = (state ?? "").toUpperCase();
-  if (s === "ORDER_COMPLETED") return { label: "Hoàn tất", variant: "secondary" };
-  if (s === "ORDER_CANCELLED" || s === "ORDER_REJECTED" || s === "ORDER_EXPIRED")
-    return { label: "Đã hủy", variant: "destructive" };
-  if (s === "ORDER_READY") return { label: "Sẵn sàng", variant: "outline" };
-  if (s === "ORDER_IN_PREPARE" || s === "ORDER_PREPARING")
-    return { label: "Đang chuẩn bị", variant: "default" };
-  if (s === "ORDER_SCHEDULED") return { label: "Đã lên lịch", variant: "outline" };
-  if (!s) return { label: "—", variant: "outline" };
-  return { label: s, variant: "outline" };
+  const s = orderStatus(state);
+  return { label: s.label, variant: s.tone };
 }
 
 // ── tab buckets ──────────────────────────────────────────────────────────────
@@ -146,7 +147,10 @@ function CustomerCard({ customer }: { customer: CustomerSummary }) {
               </span>
             </span>
           </CardTitle>
-          <Badge variant={state.variant}>{state.label}</Badge>
+          <div className="flex flex-wrap items-center justify-end gap-1">
+            <CustomerTypeBadge isNew={customer.isNewCustomer} />
+            <Badge variant={state.variant}>{state.label}</Badge>
+          </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-2 text-sm">
@@ -281,11 +285,15 @@ function OrderRow({ order }: { order: OrderSummary }) {
         <div className="text-xs text-(--color-muted-foreground)">{order.orderId}</div>
       </div>
       <div className="col-span-12 md:col-span-4">
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
           <User className="h-3.5 w-3.5 text-(--color-muted-foreground)" />
           <span className={isAnonymised ? "italic text-(--color-muted-foreground)" : undefined}>
             {eaterName}
           </span>
+          {/* Survives anonymisation: Grab strips the name and phone on
+              some finalised orders but keeps the flag, so this is often
+              the only thing left saying who the order came from. */}
+          <CustomerTypeBadge isNew={order.detail.isNewCustomer} />
         </div>
         {eaterPhone && (
           <div className="flex items-center gap-1.5 text-xs text-(--color-muted-foreground)">
@@ -397,6 +405,11 @@ export function CustomersClient() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Sits above the tabs, not inside one: the split applies to every
+          lens below it, and it is the answer the operator came for —
+          whether the store is growing on new faces or on repeat custom. */}
+      {data?.customerMix && <CustomerMixCard mix={data.customerMix} />}
 
       {/* Tabs — custom button pattern (same as orders-client.tsx) */}
       <div className="flex flex-wrap gap-2 border-b border-(--color-border) pb-2">

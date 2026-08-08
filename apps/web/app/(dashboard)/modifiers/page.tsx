@@ -1,14 +1,10 @@
-import { PageHeader } from "@/components/layout/page-header";
-import { ModifiersClient } from "./modifiers-client";
+import { redirect } from "next/navigation";
 
+/**
+ * Modifiers moved under the menu page as a tab — see
+ * `app/(dashboard)/menu/menu-client.tsx`. This route is kept so old
+ * links and bookmarks land on the add-ons tab instead of a 404.
+ */
 export default function ModifiersPage() {
-  return (
-    <div className="space-y-6 p-6">
-      <PageHeader
-        title="Nhóm tùy chọn"
-        description="Phần thêm, kích thước và lựa chọn bắt buộc."
-      />
-      <ModifiersClient />
-    </div>
-  );
+  redirect("/menu?tab=addons");
 }

@@ -19,6 +19,8 @@ from unittest.mock import patch
 import httpx
 import pytest
 import respx
+
+from app.core.grab_errors import PASSCODE_CODE
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, create_engine
@@ -991,12 +993,19 @@ class TestCategories:
         assert resp.status_code == 200
         assert resp.json()["deleted"] is True
 
+    @staticmethod
+    def _mock_menu(payload: dict) -> None:
+        respx.get(url__startswith="https://api.grab.com/food/merchant/v2/menu").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+
     @respx.mock
     def test_sort_categories_calls_grab(
         self, client: TestClient, login_cookies: dict
     ) -> None:
         """PUT /api/categories/sort calls Grab sort endpoint."""
-        respx.put("https://api.grab.com/food/merchant/categories-sort").mock(
+        self._mock_menu({"categories": [{"categoryID": "cat1"}]})
+        route = respx.put("https://api.grab.com/food/merchant/categories-sort").mock(
             return_value=httpx.Response(200, json={})
         )
 
@@ -1007,6 +1016,571 @@ class TestCategories:
         )
         assert resp.status_code == 200
         assert resp.json()["success"] is True
+
+        # A flat menu keeps the shape the capture proved.
+        sent = json.loads(route.calls[0].request.content)
+        assert sent["sectionSorts"] == [
+            {"sectionID": "", "sorts": [{"resourceID": "cat1", "sortOrder": 0}]}
+        ]
+
+    @respx.mock
+    def test_sort_categories_uses_real_section_ids(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """A menu built from sections must not be sorted as `sectionID: ""`.
+
+        Grab reorders *within* a section. Sending an empty id for a
+        category that lives in one asks it to reorder a section that
+        doesn't exist — which is how the same code path works for a store
+        with a flat menu and fails for a store without one.
+        """
+        self._mock_menu(
+            {
+                "sections": [
+                    {"sectionID": "SEC-A", "categories": [{"categoryID": "cat1"}]},
+                    {"sectionID": "SEC-B", "categories": [{"categoryID": "cat2"}]},
+                ]
+            }
+        )
+        route = respx.put("https://api.grab.com/food/merchant/categories-sort").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        resp = client.put(
+            "/api/categories/sort",
+            json={
+                "items": [
+                    {"resource_id": "cat1", "sort_order": 1},
+                    {"resource_id": "cat2", "sort_order": 0},
+                ]
+            },
+            cookies=login_cookies,
+        )
+        assert resp.status_code == 200
+
+        sent = json.loads(route.calls[0].request.content)
+        by_section = {g["sectionID"]: g["sorts"] for g in sent["sectionSorts"]}
+        assert by_section == {
+            "SEC-A": [{"resourceID": "cat1", "sortOrder": 1}],
+            "SEC-B": [{"resourceID": "cat2", "sortOrder": 0}],
+        }
+
+    @respx.mock
+    def test_sort_still_attempted_when_menu_lookup_fails(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """A menu read failing should not block the reorder outright.
+
+        The flat shape is the common case, so falling back beats refusing.
+        """
+        respx.get(url__startswith="https://api.grab.com/food/merchant/v2/menu").mock(
+            side_effect=httpx.ConnectError("no route")
+        )
+        route = respx.put("https://api.grab.com/food/merchant/categories-sort").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        resp = client.put(
+            "/api/categories/sort",
+            json={"items": [{"resource_id": "cat1", "sort_order": 0}]},
+            cookies=login_cookies,
+        )
+        assert resp.status_code == 200
+        assert route.called
+
+    @respx.mock
+    def test_grab_rejection_is_not_an_internal_server_error(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """The bug an operator actually hit: reorder → "Internal Server Error".
+
+        Every write here ended at an uncaught `raise_for_status()`, so a
+        Grab 4xx surfaced as a 500 and pointed the operator at the wrong
+        system while Grab's own reason sat unread in a log.
+        """
+        self._mock_menu({"categories": [{"categoryID": "cat1"}]})
+        respx.put("https://api.grab.com/food/merchant/categories-sort").mock(
+            return_value=httpx.Response(
+                400, json={"message": "invalid section", "target": "InvalidSection"}
+            )
+        )
+
+        resp = client.put(
+            "/api/categories/sort",
+            json={"items": [{"resource_id": "cat1", "sort_order": 0}]},
+            cookies=login_cookies,
+        )
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert detail["code"] == "grab_category_write_failed"
+        # Grab's own sentence reaches the operator.
+        assert "invalid section" in detail["message"]
+        assert detail["grab_target"] == "InvalidSection"
+
+    @respx.mock
+    def test_expired_token_is_reported_as_such(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """403 means log in again, not "the server broke"."""
+        self._mock_menu({"categories": []})
+        respx.put("https://api.grab.com/food/merchant/categories-sort").mock(
+            return_value=httpx.Response(403, json={})
+        )
+
+        resp = client.put(
+            "/api/categories/sort",
+            json={"items": [{"resource_id": "cat1", "sort_order": 0}]},
+            cookies=login_cookies,
+        )
+        assert resp.status_code == 400
+        assert "đăng nhập lại" in resp.json()["detail"]["message"]
+
+    @respx.mock
+    def test_create_category_rejection_is_mapped(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        respx.post("https://api.grab.com/food/merchant/v1/menu-translations").mock(
+            return_value=httpx.Response(200, json={"textTranslation": {"en": "X"}})
+        )
+        respx.post("https://api.grab.com/food/merchant/v2/categories").mock(
+            return_value=httpx.Response(409, json={"message": "name already exists"})
+        )
+
+        resp = client.post(
+            "/api/categories/", json={"name": "Trùng tên"}, cookies=login_cookies
+        )
+        assert resp.status_code == 400
+        assert "name already exists" in resp.json()["detail"]["message"]
+
+    @respx.mock
+    def test_delete_category_rejection_is_mapped(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        respx.delete("https://api.grab.com/food/merchant/v2/categories/gone").mock(
+            return_value=httpx.Response(404, json={})
+        )
+
+        resp = client.delete("/api/categories/gone", cookies=login_cookies)
+        # 404 survives as 404 — "that category is gone" is not the same
+        # answer as "Grab refused this change".
+        assert resp.status_code == 404
+        assert "không tìm thấy" in resp.json()["detail"]["message"].lower()
+
+    @respx.mock
+    def test_malformed_menu_does_not_crash_the_reorder(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """The menu lookup added here must not itself produce a 500.
+
+        It exists to stop reorders returning "Internal Server Error"; a
+        body that isn't the expected JSON object would be a bitter way to
+        reintroduce exactly that.
+        """
+        respx.get(url__startswith="https://api.grab.com/food/merchant/v2/menu").mock(
+            return_value=httpx.Response(200, text="<html>gateway error</html>")
+        )
+        route = respx.put("https://api.grab.com/food/merchant/categories-sort").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        resp = client.put(
+            "/api/categories/sort",
+            json={"items": [{"resource_id": "cat1", "sort_order": 0}]},
+            cookies=login_cookies,
+        )
+        assert resp.status_code == 200
+        assert route.called
+
+    @respx.mock
+    def test_non_object_menu_does_not_crash_the_reorder(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """Valid JSON that isn't an object — `null`, a bare list."""
+        respx.get(url__startswith="https://api.grab.com/food/merchant/v2/menu").mock(
+            return_value=httpx.Response(200, json=[])
+        )
+        respx.put("https://api.grab.com/food/merchant/categories-sort").mock(
+            return_value=httpx.Response(200, json={})
+        )
+
+        resp = client.put(
+            "/api/categories/sort",
+            json={"items": [{"resource_id": "cat1", "sort_order": 0}]},
+            cookies=login_cookies,
+        )
+        assert resp.status_code == 200
+
+
+class TestGoldenApron:
+    """`GET /api/golden-apron` — the tier ladder plus per-metric progress.
+
+    The route fans out one Grab request per metric (the goals service
+    only answers one key per call), so most of what can go wrong is in
+    the orchestration rather than the parsing.
+    """
+
+    LANDING = {
+        "sdui_body": {
+            "children": [
+                {
+                    "analytics": {
+                        "on_show": {
+                            "event": "METRIC_SHOWN",
+                            "params": {
+                                "SELECTED_TIER": "Bạc",
+                                "METRIC_NAME": "total_order",
+                                "METRIC_STATUS": "NOT_ACHIEVED",
+                                "TIER_NAME": "Basic",
+                                "IS_FIRST_MONTH": "false",
+                            },
+                        }
+                    },
+                    "children": [
+                        {"type": "text", "data": "Số lượng đơn hàng"},
+                        {"type": "text", "data": "Đạt ít nhất 50"},
+                    ],
+                },
+                {
+                    "analytics": {
+                        "on_show": {
+                            "event": "METRIC_SHOWN",
+                            "params": {
+                                "SELECTED_TIER": "Bạc",
+                                "METRIC_NAME": "rating",
+                                "METRIC_STATUS": "ACHIEVED",
+                                "TIER_NAME": "Basic",
+                                "IS_FIRST_MONTH": "false",
+                            },
+                        }
+                    },
+                    "children": [
+                        {"type": "text", "data": "Số sao đánh giá trung bình"},
+                        {"type": "text", "data": "Đạt ít nhất 4.2"},
+                    ],
+                },
+            ]
+        }
+    }
+
+    @staticmethod
+    def _mock_landing(payload=None) -> None:
+        respx.get(
+            url__startswith="https://api.grab.com/mex-app/troy/sdui/v2/view/mqp_tier.landing_page"
+        ).mock(
+            return_value=httpx.Response(
+                200, json=payload if payload is not None else TestGoldenApron.LANDING
+            )
+        )
+
+    @staticmethod
+    def _mock_feedback(**kwargs) -> None:
+        respx.get(
+            url__startswith="https://api.grab.com/mex-app/troy/insights/v1/feedback-overview"
+        ).mock(
+            return_value=kwargs.pop(
+                "response",
+                httpx.Response(
+                    200,
+                    json={
+                        "feedbackOverview": {
+                            "aggregatedRatingScore": 4.5,
+                            "ratingCount": 14,
+                        }
+                    },
+                ),
+            )
+        )
+
+    @respx.mock
+    def test_returns_the_ladder_with_progress(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        self._mock_landing()
+        self._mock_feedback()
+        goals = respx.post("https://api.grab.com/mex-app/troy/mqp/v1/goals").mock(
+            return_value=httpx.Response(
+                200, json={"goals": [{"goal_name": "orders", "current": "7"}]}
+            )
+        )
+
+        resp = client.get("/api/golden-apron", cookies=login_cookies)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        assert body["currentTier"] == "Cơ Bản"
+        assert body["rating"] == 4.5
+        assert body["ratingCount"] == 14
+        (level,) = body["levels"]
+        assert level["achievedCount"] == 1
+        assert level["totalCount"] == 2
+
+        by_metric = {m["metric"]: m for m in level["metrics"]}
+        assert by_metric["total_order"]["current"] == 7
+        # Rating comes from feedback, never from goals.
+        assert by_metric["rating"]["current"] == 4.5
+
+        # `rating` is feedback-backed, so it must not be asked of goals.
+        asked = {json.loads(c.request.content)["goals"][0] for c in goals.calls}
+        assert asked == {"orders"}
+
+    @respx.mock
+    def test_malformed_goals_body_does_not_sink_the_page(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """A 200 carrying HTML is a `ValueError`, not an `httpx.HTTPError`.
+
+        Uncaught it would escape the fan-out and 500 a request whose
+        ladder — the expensive part — had already been parsed.
+        """
+        self._mock_landing()
+        self._mock_feedback()
+        respx.post("https://api.grab.com/mex-app/troy/mqp/v1/goals").mock(
+            return_value=httpx.Response(200, text="<html>gateway</html>")
+        )
+
+        resp = client.get("/api/golden-apron", cookies=login_cookies)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert len(body["levels"]) == 1
+        # Reported, not silently indistinguishable from "Grab has no figure".
+        assert body["warnings"]
+        by_metric = {m["metric"]: m for m in body["levels"][0]["metrics"]}
+        assert by_metric["total_order"]["current"] is None
+
+    @respx.mock
+    def test_malformed_feedback_body_does_not_sink_the_page(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        self._mock_landing()
+        self._mock_feedback(response=httpx.Response(200, text="not json"))
+        respx.post("https://api.grab.com/mex-app/troy/mqp/v1/goals").mock(
+            return_value=httpx.Response(
+                200, json={"goals": [{"goal_name": "orders", "current": "7"}]}
+            )
+        )
+
+        resp = client.get("/api/golden-apron", cookies=login_cookies)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["rating"] is None
+        assert any("đánh giá" in w for w in body["warnings"])
+        # The half that worked still landed.
+        by_metric = {m["metric"]: m for m in body["levels"][0]["metrics"]}
+        assert by_metric["total_order"]["current"] == 7
+
+    @respx.mock
+    def test_tier_page_failure_is_a_502_not_an_empty_page(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """Without the ladder there are no conditions to show progress against."""
+        respx.get(
+            url__startswith="https://api.grab.com/mex-app/troy/sdui/v2/view/mqp_tier.landing_page"
+        ).mock(return_value=httpx.Response(403, json={}))
+
+        resp = client.get("/api/golden-apron", cookies=login_cookies)
+        assert resp.status_code == 502
+        assert resp.json()["detail"]["code"] == "grab_tier_page_failed"
+
+    @respx.mock
+    def test_page_with_no_metrics_reports_itself(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """Grab redesigning its tier page must not look like "no conditions"."""
+        self._mock_landing({"sdui_body": {"children": []}})
+
+        resp = client.get("/api/golden-apron", cookies=login_cookies)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["levels"] == []
+        assert body["warnings"]
+
+    def test_requires_auth(self, client: TestClient) -> None:
+        assert client.get("/api/golden-apron").status_code == 401
+
+    # ── /summary — what the dashboard header shows ──────────────────────
+
+    @staticmethod
+    def _mock_scorecard(**kwargs) -> None:
+        respx.get(
+            url__startswith="https://api.grab.com/mex-app/troy/scorecard/v1/profile"
+        ).mock(
+            return_value=kwargs.pop(
+                "response",
+                httpx.Response(
+                    200,
+                    json={
+                        "title": "Chúc mừng 🎉",
+                        "desc": "Quán của bạn đã có các thông tin cần thiết.",
+                        "score": 100,
+                        "scoreRank": "HIGH",
+                        "shouldShowScore": False,
+                    },
+                ),
+            )
+        )
+
+    @respx.mock
+    def test_summary_returns_tier_stars_and_apron_title(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """The header shows stars, tier and badge — and no goals fan-out.
+
+        Nine extra Grab round-trips whose numbers the header never
+        renders would be paying for the whole ladder to draw one rung.
+        """
+        self._mock_landing()
+        self._mock_feedback()
+        self._mock_scorecard()
+        goals = respx.post("https://api.grab.com/mex-app/troy/mqp/v1/goals").mock(
+            return_value=httpx.Response(200, json={"goals": []})
+        )
+
+        resp = client.get("/api/golden-apron/summary", cookies=login_cookies)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+
+        assert body["currentTier"] == "Cơ Bản"
+        assert body["apronTitle"] == "Tạp Dề Cơ Bản"
+        assert body["rating"] == 4.5
+        assert body["ratingCount"] == 14
+        # Grab's `score` is profile completeness out of 100, never a star
+        # rating — the header used to render it as "100.0 / 5".
+        assert body["profileScore"] == 100
+        assert body["rating"] != body["profileScore"]
+        assert not goals.called
+
+    @respx.mock
+    def test_summary_reports_the_current_tier_progress(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        self._mock_landing()
+        self._mock_feedback()
+        self._mock_scorecard()
+
+        body = client.get(
+            "/api/golden-apron/summary", cookies=login_cookies
+        ).json()
+        # The fixture's only rung is "Bạc" while the current tier is
+        # "Cơ Bản", so there is no matching rung to report progress for.
+        assert body["totalCount"] == 0
+
+    @respx.mock
+    def test_summary_survives_a_dead_scorecard(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """Profile completeness is the least important of the three."""
+        self._mock_landing()
+        self._mock_feedback()
+        self._mock_scorecard(response=httpx.Response(500, json={}))
+
+        resp = client.get("/api/golden-apron/summary", cookies=login_cookies)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["apronTitle"] == "Tạp Dề Cơ Bản"
+        assert body["profileScore"] is None
+
+    @respx.mock
+    def test_summary_warns_when_stars_are_missing(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        self._mock_landing()
+        self._mock_feedback(response=httpx.Response(200, text="not json"))
+        self._mock_scorecard()
+
+        body = client.get(
+            "/api/golden-apron/summary", cookies=login_cookies
+        ).json()
+        assert body["rating"] is None
+        assert any("sao" in w for w in body["warnings"])
+
+    @respx.mock
+    def test_summary_invents_no_title_without_a_tier(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """No tier from Grab → no badge, rather than a made-up rank."""
+        self._mock_landing({"sdui_body": {"children": []}})
+        self._mock_feedback()
+        self._mock_scorecard()
+
+        body = client.get(
+            "/api/golden-apron/summary", cookies=login_cookies
+        ).json()
+        assert body["currentTier"] == ""
+        assert body["apronTitle"] == ""
+        assert body["warnings"]
+
+
+PASSCODE_BODY = {
+    "target": "ErrPasscodeForbidden",
+    "reason": "forbidden",
+    "message": "Token not valid",
+}
+
+
+class TestPasscodeSurfacedByRouters:
+    """Every write path must name the real cause, not its own guess."""
+
+    @respx.mock
+    def test_category_sort_reports_the_passcode(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """This is also the likeliest cause of the reorder "500" reported
+        earlier from a second account."""
+        respx.get(url__startswith="https://api.grab.com/food/merchant/v2/menu").mock(
+            return_value=httpx.Response(200, json={"categories": [{"categoryID": "cat1"}]})
+        )
+        respx.put("https://api.grab.com/food/merchant/categories-sort").mock(
+            return_value=httpx.Response(403, json=PASSCODE_BODY)
+        )
+
+        resp = client.put(
+            "/api/categories/sort",
+            json={"items": [{"resource_id": "cat1", "sort_order": 0}]},
+            cookies=login_cookies,
+        )
+        assert resp.status_code == 403
+        detail = resp.json()["detail"]
+        assert detail["code"] == PASSCODE_CODE
+        assert "mã PIN" in detail["message"]
+        # Must NOT tell them to log in again — that changes nothing.
+        assert "đăng nhập lại" not in detail["message"]
+
+    @respx.mock
+    def test_category_create_reports_the_passcode(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        respx.post("https://api.grab.com/food/merchant/v1/menu-translations").mock(
+            return_value=httpx.Response(200, json={"textTranslation": {"en": "X"}})
+        )
+        respx.post("https://api.grab.com/food/merchant/v2/categories").mock(
+            return_value=httpx.Response(403, json=PASSCODE_BODY)
+        )
+
+        resp = client.post(
+            "/api/categories/", json={"name": "Món mới"}, cookies=login_cookies
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"]["code"] == PASSCODE_CODE
+
+    @respx.mock
+    def test_a_genuine_403_still_reads_as_a_token_problem(
+        self, client: TestClient, login_cookies: dict
+    ) -> None:
+        """Not every 403 is the passcode — the old message still applies."""
+        respx.get(url__startswith="https://api.grab.com/food/merchant/v2/menu").mock(
+            return_value=httpx.Response(200, json={"categories": []})
+        )
+        respx.put("https://api.grab.com/food/merchant/categories-sort").mock(
+            return_value=httpx.Response(403, json={"message": "no access"})
+        )
+
+        resp = client.put(
+            "/api/categories/sort",
+            json={"items": [{"resource_id": "cat1", "sort_order": 0}]},
+            cookies=login_cookies,
+        )
+        assert resp.json()["detail"]["code"] != PASSCODE_CODE
+        assert "đăng nhập lại" in resp.json()["detail"]["message"]
 
 
 # ── Items tests ─────────────────────────────────────────────────────────────────

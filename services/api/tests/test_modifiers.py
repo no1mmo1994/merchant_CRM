@@ -9,6 +9,7 @@ import pytest
 import respx
 from fastapi import HTTPException
 
+from app.core.grab_errors import PASSCODE_SHORT
 from app.models import AuditLog, User
 from app.routers.modifiers import (
     _selection_range_error,
@@ -1268,6 +1269,78 @@ async def test_set_group_items_link_409_counts_as_unchanged_not_failed(
     assert result.unchanged == ["A"]
     assert result.linked == []
     assert result.failed == {}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_group_items_link_403_passcode_named_not_shown_as_http_403(
+    authn_token: str, merchant_id: str, db_session
+) -> None:
+    """The failure the operator actually hit.
+
+    Grab now gates every menu write behind a merchant passcode and answers
+    `403 ErrPasscodeForbidden` — measured live on 2026-08-08 for linking,
+    group create/edit/delete, category create/delete and category sort,
+    while reads and the menu-edit lock still succeed.
+
+    Reported as `HTTP 403` per item, three item ids in a toast, it reads
+    as a fault in those items — which is exactly how it was reported to
+    us ("can't link items"), when nothing about the items or the link was
+    wrong. The failure map has to name the cause.
+    """
+    user = User(username="set-items-passcode@example.com", password_hash="x")
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    respx.get(_MENU_URL).mock(
+        return_value=httpx.Response(200, json=_nested_menu(_menu_item("A", linked=[])))
+    )
+    respx.post(_LOCK_URL).mock(return_value=httpx.Response(200))
+    respx.post(_LINK_URL).mock(
+        return_value=httpx.Response(
+            403,
+            json={
+                "target": "ErrPasscodeForbidden",
+                "reason": "forbidden",
+                "message": "Token not valid",
+            },
+        )
+    )
+
+    body = LinkModifierGroupItemsRequest(item_ids=["A"])
+    async with GrabClient(authn_token=authn_token, merchant_id=merchant_id) as c:
+        result = await set_group_items("MOG1", body, user=user, client=c, session=db_session)
+
+    assert result.linked == []
+    assert result.failed == {"A": PASSCODE_SHORT}
+    assert "403" not in result.failed["A"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_set_group_items_ordinary_403_still_reads_as_a_status(
+    authn_token: str, merchant_id: str, db_session
+) -> None:
+    """Not every 403 is the passcode — the plain status still shows."""
+    user = User(username="set-items-plain403@example.com", password_hash="x")
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    respx.get(_MENU_URL).mock(
+        return_value=httpx.Response(200, json=_nested_menu(_menu_item("A", linked=[])))
+    )
+    respx.post(_LOCK_URL).mock(return_value=httpx.Response(200))
+    respx.post(_LINK_URL).mock(
+        return_value=httpx.Response(403, json={"message": "no access"})
+    )
+
+    body = LinkModifierGroupItemsRequest(item_ids=["A"])
+    async with GrabClient(authn_token=authn_token, merchant_id=merchant_id) as c:
+        result = await set_group_items("MOG1", body, user=user, client=c, session=db_session)
+
+    assert result.failed == {"A": "HTTP 403"}
 
 
 @pytest.mark.asyncio

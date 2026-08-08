@@ -196,8 +196,13 @@ class GrabClient:
         path: str,
         *,
         params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
-        return await self._request("GET", path, params=params)
+        # `headers` mirrors `post`. Some GETs need an extra header the
+        # shared set doesn't carry — the marketing campaigns endpoint
+        # wants `x-marketing-version`, and without it Grab answers with a
+        # different (older) payload shape.
+        return await self._request("GET", path, params=params, headers=headers)
 
     async def post(
         self,

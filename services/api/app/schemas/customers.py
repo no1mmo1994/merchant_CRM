@@ -53,6 +53,12 @@ class CustomerSummary(BaseModel):
     total_display: str = Field(default="", alias="totalDisplay")
     last_order_at: datetime | None = Field(default=None, alias="lastOrderAt")
     last_state: str = Field(default="", alias="lastState")
+    #: Grab's verdict on this person as of their **most recent** order.
+    #: Distinct from `orderCount`, which only knows what this dashboard
+    #: has archived — Grab has seen their whole history with the store,
+    #: including orders from before the dashboard existed. `None` when
+    #: Grab didn't say.
+    is_new_customer: bool | None = Field(default=None, alias="isNewCustomer")
 
 
 class SourceSummary(BaseModel):
@@ -117,6 +123,57 @@ class OrderSummary(BaseModel):
     detail: OrderDetailLite = Field(default_factory=OrderDetailLite)
 
 
+class CustomerMixBucket(BaseModel):
+    """Trading figures for one slice of customers.
+
+    Cancelled orders are counted but kept out of revenue — a cancelled
+    order still says something about demand, and folding its total into
+    revenue would overstate takings. Half the orders archived so far are
+    cancelled, so this is not a hypothetical distinction.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    #: Every archived order in this slice, cancelled included.
+    orders: int = 0
+    cancelled_orders: int = Field(default=0, alias="cancelledOrders")
+    #: Distinct phone numbers. A person can appear in both the new and
+    #: returning slices — they were new once and came back.
+    customers: int = 0
+    #: Sum of `fare.totalDisplay`, cancelled orders excluded.
+    revenue_vnd: float = Field(default=0.0, alias="revenueVnd")
+    #: Revenue over non-cancelled orders, so it reads as "what an order
+    #: from this kind of customer is worth".
+    avg_order_value: float = Field(default=0.0, alias="avgOrderValue")
+
+
+class CustomerMix(BaseModel):
+    """New versus returning customers, the trading question behind them.
+
+    Grab labels each order with `flags.isPaxNewCustomer`, which is the
+    only view of a customer's history with the store that predates this
+    dashboard. Splitting orders and revenue along it answers what the
+    order list on its own cannot: whether the store is growing on new
+    faces or on people coming back, and which of the two spends more.
+
+    `unknown` holds orders where Grab sent no flag. It is reported rather
+    than folded into `returning` so a gap in the data never reads as a
+    finding about customer behaviour.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    new: CustomerMixBucket = Field(default_factory=CustomerMixBucket)
+    returning: CustomerMixBucket = Field(default_factory=CustomerMixBucket)
+    unknown: CustomerMixBucket = Field(default_factory=CustomerMixBucket)
+    #: New orders over new+returning, 0–1. `None` when neither slice has
+    #: an order — no orders is not a 0% new-customer rate.
+    new_order_share: float | None = Field(default=None, alias="newOrderShare")
+    #: The same split over revenue. `None` when both slices earned
+    #: nothing, e.g. every order so far was cancelled.
+    new_revenue_share: float | None = Field(default=None, alias="newRevenueShare")
+
+
 class CustomersOverviewResponse(BaseModel):
     """Three-lens view over every order the dashboard has ever fetched.
 
@@ -132,3 +189,7 @@ class CustomersOverviewResponse(BaseModel):
     customers: list[CustomerSummary] = Field(default_factory=list)
     sources: list[SourceSummary] = Field(default_factory=list)
     orders: list[OrderSummary] = Field(default_factory=list)
+    #: New vs returning, across the same rows — the headline above the tabs.
+    customer_mix: CustomerMix = Field(
+        default_factory=CustomerMix, alias="customerMix"
+    )

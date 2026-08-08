@@ -22,6 +22,12 @@ export interface FinancialMetricValue {
   display: string;
   /** Integer amount in minor currency units (e.g. VND subunits). */
   value_minor: number;
+  /**
+   * Grab's own label for this row. Several distinct costs can share one
+   * bucket — "Khấu trừ" is both the platform commission and the
+   * advertising fee — so without this the UI can only say "#1" / "#2".
+   */
+  name?: string;
 }
 
 /**

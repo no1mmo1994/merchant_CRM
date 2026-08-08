@@ -89,13 +89,28 @@ _METRIC_ORDER: tuple[str, ...] = (
 # Multi-key labels (``Deduction``) are handled by stacking values into
 # the same Vietnamese bucket so the operator still sees a single
 # "Khấu trừ" KPI that includes both platform commission and marketing.
+# Grab answers in whatever `accept-language` asks for. `donhang/
+# getdoanhthu.py` matches the Vietnamese labels directly and works, so
+# both sets are listed rather than assuming one — a store that gets the
+# other language should not silently lose every metric.
 _LABEL_MAP: dict[str, str] = {
+    # English wire labels
     "Net sales": "Doanh thu",
     "Net earnings": "Doanh thu ròng",  # mirror the operator's "Doanh thu ròng" phrasing
     "Sales": "Doanh thu",
     "Deduction": "Khấu trừ",
     "VAT amount": "Thuế GTGT",
     "PIT amount": "Thuế TNCN",
+    "Net income": "Thu nhập ròng",
+    "Take home": "Thu nhập ròng",
+    # Vietnamese wire labels — identity mappings, so they survive the
+    # same path instead of being dropped as "unknown".
+    "Doanh thu": "Doanh thu",
+    "Doanh thu ròng": "Doanh thu ròng",
+    "Khấu trừ": "Khấu trừ",
+    "Thuế GTGT": "Thuế GTGT",
+    "Thuế TNCN": "Thuế TNCN",
+    "Thu nhập ròng": "Thu nhập ròng",
 }
 
 
@@ -191,22 +206,31 @@ def _extract_currency_name(raw: Any) -> str:
     return "VND"
 
 
-def _walk(node: Any, metrics: dict[str, list[int]]) -> None:
-    """Recursively collect ``_LABEL_MAP`` labels from the uiBreakdown tree.
+def _walk(
+    node: Any,
+    metrics: dict[str, list[tuple[str, int]]],
+    parent: tuple[str, int] | None = None,
+) -> None:
+    """Collect every labelled amount in the uiBreakdown tree.
 
-    Mirrors the recursive structure of ``donhang/getdoanhthu.py``'s
-    ``extract_financial_metrics`` (walk every list, descend into every
-    ``uiBreakdown``), but uses *English* keys from ``_LABEL_MAP`` and
-    the real ``_extract_text_value`` extractor rather than the script's
-    Vietnamese set / nested-dict assumption. Each match is translated
-    to its Vietnamese target before storage.
+    Mirrors ``donhang/getdoanhthu.py``'s ``extract_financial_metrics``
+    (walk every list, descend into every ``uiBreakdown``) but keeps
+    Grab's own label for each amount, because one bucket routinely holds
+    several distinct costs — a store's "Khấu trừ" is the platform
+    commission AND the advertising fee, and "#1 / #2" tells the operator
+    nothing.
 
-    Dedup: Grab's wire payload carries the same number on both a
-    parent accordion (``Net sales`` on the ``Food & Dine Out`` row)
-    and its first child (``Net sales`` on the indented subrow). The
-    script handled this by reading only the first match it found; we
-    do the same by deduping against the last-seen value per target
-    label so we never display ``+2.680.000 ₫`` twice.
+    Unmapped labels are kept rather than discarded. The advertising fee
+    arrives under a "Tiếp thị" accordion that no mapping covers, so the
+    old ``if label in _LABEL_MAP`` gate threw it away.
+
+    **The accordion double-count.** Grab repeats the same number on a
+    parent row and its first child: ``Khấu trừ -502.641`` then
+    ``Phí nền tảng -502.641`` underneath. Both are the same money. A
+    child whose amount equals its parent's is therefore treated as the
+    parent's *name* — it renames the row already recorded instead of
+    adding a second one. That is what turns an anonymous "Khấu trừ #2"
+    into "Phí quảng cáo" without double-counting it.
     """
     if not isinstance(node, list):
         return
@@ -214,37 +238,61 @@ def _walk(node: Any, metrics: dict[str, list[int]]) -> None:
         if not isinstance(item, dict):
             continue
         label = str(item.get("label") or "")
-        if label in _LABEL_MAP:
-            target = _LABEL_MAP[label]
-            # Two read paths: own `value`, then fall back to first
-            # child's `value`. The script did the same fallback for
-            # nested amounts; the real response places a chevron
-            # `value` next to a numbered child for *most* lines.
-            v = item.get("value")
-            display, val = _extract_text_value(v)
+        recorded: tuple[str, int] | None = None
+        if label:
+            target = _LABEL_MAP.get(label, label)
+            # Two read paths: own `value`, then fall back to the first
+            # child's. The real response puts a chevron `value` next to a
+            # numbered child for most lines.
+            display, val = _extract_text_value(item.get("value"))
             if val is None:
                 children = item.get("uiBreakdown")
                 if isinstance(children, list) and children:
-                    display2, val2 = _extract_text_value(children[0].get("value"))
+                    _display2, val2 = _extract_text_value(children[0].get("value"))
                     if val2 is not None:
-                        display, val = display2 or display, val2
+                        val = val2
             if val is not None:
-                bucket = metrics.setdefault(target, [])
-                # Skip if this is the same value as the last recorded
-                # one for this target — that's the accordion / first-
-                # child double-tap pattern.
-                if not bucket or bucket[-1] != val:
-                    bucket.append(val)
-        # Descend — sibling subtrees can carry more matches (e.g. two
-        # ``Deduction`` accordions for "platform commission" and
-        # "marketing").
+                if parent is not None and parent[1] == val:
+                    # Same money as the row above: this is that row's
+                    # detail, not a new cost. Two ways it can refine it:
+                    #
+                    #  * the child names a KNOWN metric — then the child
+                    #    decides which bucket the money belongs in, and
+                    #    the parent was only a container. Grab nests the
+                    #    ad spend as Tiếp thị > Khấu trừ > Phí quảng cáo;
+                    #    without this the amount would file itself under
+                    #    "Tiếp thị" and never reach the Khấu trừ total.
+                    #  * otherwise it is just a better name for the row.
+                    bucket = metrics.get(parent[0])
+                    if bucket and bucket[-1][1] == val:
+                        if target in _METRIC_ORDER and target != parent[0]:
+                            bucket.pop()
+                            if not bucket:
+                                metrics.pop(parent[0], None)
+                            moved = metrics.setdefault(target, [])
+                            if not moved or moved[-1][1] != val:
+                                moved.append((label, val))
+                            recorded = (target, val)
+                        else:
+                            if bucket[-1][0] != label:
+                                bucket[-1] = (label, val)
+                            recorded = parent
+                    else:
+                        recorded = parent
+                else:
+                    bucket = metrics.setdefault(target, [])
+                    if not bucket or bucket[-1][1] != val:
+                        bucket.append((label, val))
+                    recorded = (target, val)
+        # Descend — sibling subtrees carry more matches (two ``Deduction``
+        # accordions, one for commission and one for marketing).
         deeper = item.get("uiBreakdown")
         if isinstance(deeper, list):
-            _walk(deeper, metrics)
+            _walk(deeper, metrics, recorded if recorded is not None else parent)
 
 
 def _project_metrics(
-    metrics_map: dict[str, list[int]],
+    metrics_map: dict[str, list[tuple[str, int]]],
     raw_breakdown: list[dict[str, Any]] | None,
 ) -> list[FinancialMetricGroup]:
     """Project the dict-of-lists into ordered ``FinancialMetricGroup`` rows.
@@ -270,8 +318,10 @@ def _project_metrics(
             FinancialMetricGroup(
                 label=label,
                 values=[
-                    FinancialMetricValue(display=_sign_display(v), value_minor=v)
-                    for v in values
+                    FinancialMetricValue(
+                        display=_sign_display(v), value_minor=v, name=name
+                    )
+                    for name, v in values
                 ],
             )
         )
@@ -282,8 +332,10 @@ def _project_metrics(
             FinancialMetricGroup(
                 label=label,
                 values=[
-                    FinancialMetricValue(display=_sign_display(v), value_minor=v)
-                    for v in metrics_map[label]
+                    FinancialMetricValue(
+                        display=_sign_display(v), value_minor=v, name=name
+                    )
+                    for name, v in metrics_map[label]
                 ],
             )
         )
@@ -445,7 +497,7 @@ async def get_summary(
     sales_display, sales_int = _coerce_balance(data.get("salesBalance"))
     earn_display, earn_int = _coerce_balance(data.get("earningsBalance"))
 
-    metrics_map: dict[str, list[int]] = {}
+    metrics_map: dict[str, list[tuple[str, int]]] = {}
     raw_breakdown = data.get("uiBreakdown")
     _walk(raw_breakdown if isinstance(raw_breakdown, list) else [], metrics_map)
     metric_groups = _project_metrics(metrics_map, raw_breakdown)

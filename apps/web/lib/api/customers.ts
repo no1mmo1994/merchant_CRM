@@ -45,6 +45,17 @@ export interface CustomerSummary {
   lastOrderAt: string | null;
   /** Wire key `lastState` — the archive's `state` at last sight (e.g. `ORDER_IN_PREPARE` / `ORDER_COMPLETED`). */
   lastState: string;
+  /**
+   * Wire key `isNewCustomer` — Grab's verdict as of this customer's most
+   * recent order. `null` when Grab sent no flag.
+   *
+   * Not the same question as `orderCount`: that counts what this
+   * dashboard has archived, while Grab knows the customer's whole
+   * history with the store, including orders placed before the dashboard
+   * existed. A customer with `orderCount: 1` can still be a returning
+   * one.
+   */
+  isNewCustomer: boolean | null;
 }
 
 export interface SourceSummary {
@@ -89,10 +100,42 @@ export interface OrderSummary {
 /** Re-export so the customers-client can render items without a second import. */
 export type { OrderItem };
 
+/** Trading figures for one slice of customers. */
+export interface CustomerMixBucket {
+  /** Every archived order in this slice, cancelled included. */
+  orders: number;
+  /** Wire key `cancelledOrders`. */
+  cancelledOrders: number;
+  /** Distinct phone numbers. A person can appear in both new and returning. */
+  customers: number;
+  /** Wire key `revenueVnd` — cancelled orders excluded. */
+  revenueVnd: number;
+  /** Wire key `avgOrderValue` — over non-cancelled orders only. */
+  avgOrderValue: number;
+}
+
+/**
+ * New versus returning customers.
+ *
+ * `unknown` holds orders where Grab sent no flag, kept separate so a gap
+ * in the data never reads as a finding about customer behaviour.
+ */
+export interface CustomerMix {
+  new: CustomerMixBucket;
+  returning: CustomerMixBucket;
+  unknown: CustomerMixBucket;
+  /** Wire key `newOrderShare`, 0–1. `null` when there are no orders yet. */
+  newOrderShare: number | null;
+  /** Wire key `newRevenueShare`, 0–1. `null` when nothing was earned. */
+  newRevenueShare: number | null;
+}
+
 export interface CustomersOverviewResponse {
   customers: CustomerSummary[];
   sources: SourceSummary[];
   orders: OrderSummary[];
+  /** Wire key `customerMix`. */
+  customerMix: CustomerMix;
 }
 
 const CUSTOMERS_OVERVIEW_KEY = ["customers", "overview"] as const;

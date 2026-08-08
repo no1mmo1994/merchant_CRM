@@ -69,7 +69,7 @@ function buildBreadcrumb(pathname: string | null): { label: string; href: string
     menu: "Thực đơn",
     modifiers: "Tùy chọn thêm",
     stores: "Cửa hàng",
-    analytics: "Phân tích",
+    "golden-apron": "Tạp Dề Vàng",
     settings: "Cài đặt",
   };
   const root = parts[0];

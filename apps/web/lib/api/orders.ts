@@ -1,4 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
+import * as React from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
 /**
@@ -124,6 +125,19 @@ export interface OrderDetail {
   itemInfo: OrderItemInfo;
   fare: OrderFare;
   times: OrderTimes;
+  /**
+   * Wire key `isNewCustomer`, from Grab's `flags.isPaxNewCustomer`.
+   *
+   * `true` = Grab's records say this is the eater's first order from
+   * this store, `false` = they've ordered before, `null` = Grab sent no
+   * flag. The three stay distinct: `null` renders no badge at all,
+   * because claiming "khách cũ" on the strength of a missing field would
+   * be inventing a fact about the customer.
+   *
+   * This is the only view of a customer's history that predates the
+   * dashboard — our own `orderCount` only knows what we've archived.
+   */
+  isNewCustomer: boolean | null;
   /** Wire key `mexOPT`. */
   mexOPT: OrderMexOPT;
 }
@@ -147,6 +161,8 @@ export interface OrderDetailLite {
   itemInfo: OrderItemInfo;
   fare: OrderFare;
   times: OrderTimes;
+  /** See `OrderDetail.isNewCustomer`. */
+  isNewCustomer: boolean | null;
 }
 
 export interface OrderListResponse {
@@ -321,8 +337,50 @@ export function useOrderPollStatus() {
   return useQuery({
     queryKey: ORDERS_POLL_STATUS_KEY,
     queryFn: fetchOrderPollStatus,
-    staleTime: 30_000,
+    staleTime: 10_000,
+    // Cheap: reads our own DB, no Grab call. Safe to poll often, which
+    // is what makes `useOrdersAutoRefresh` below possible.
+    refetchInterval: 15_000,
   });
+}
+
+/**
+ * Keep the orders list in step with the backend's own poll.
+ *
+ * `GET /api/orders` calls Grab on every request, so putting a
+ * `refetchInterval` on it would multiply Grab traffic by the number of
+ * open tabs and buy nothing — the data only ever changes when the
+ * 30-second cron runs. `/api/orders/poll-status` reads our database
+ * instead, so we watch that cheaply and refresh the expensive query
+ * exactly when `lastPolledAt` advances.
+ *
+ * Without this the orders page never updated on its own:
+ * `refetchOnWindowFocus` is disabled globally, so an order that went out
+ * for delivery and then completed kept showing whatever state it had
+ * when the tab was opened.
+ *
+ * Call once, near the top of the orders page.
+ */
+export function useOrdersAutoRefresh() {
+  const qc = useQueryClient();
+  const { data } = useOrderPollStatus();
+  const polledAt = data?.lastPolledAt ?? null;
+  const seenRef = React.useRef<string | null>(null);
+
+  React.useEffect(() => {
+    if (!polledAt) return;
+    // Skip the first observation: the list was fetched moments ago on
+    // mount, and refetching it immediately would double the Grab call
+    // for no new information.
+    if (seenRef.current === null) {
+      seenRef.current = polledAt;
+      return;
+    }
+    if (seenRef.current === polledAt) return;
+    seenRef.current = polledAt;
+    void qc.invalidateQueries({ queryKey: ORDERS_LIST_KEY });
+    void qc.invalidateQueries({ queryKey: ORDER_DETAIL_KEY });
+  }, [polledAt, qc]);
 }
 
 export {

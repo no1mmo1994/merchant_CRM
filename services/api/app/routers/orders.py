@@ -48,6 +48,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlmodel import Session
 
+from app.core.grab_errors import PASSCODE_CODE, PASSCODE_MESSAGE, is_passcode_error
 from app.deps import get_grab_client, get_session, require_user
 from app.models import OrderArchive, OrderSnapshot, Store, User
 from app.schemas.orders import (
@@ -55,6 +56,7 @@ from app.schemas.orders import (
     CompletedOrder,
     OrderDetail,
     OrderDetailLite,
+    extract_new_customer_flag,
     OrderEater,
     OrderFare,
     OrderHistoryResponse,
@@ -289,6 +291,7 @@ def _project_detail(raw: dict[str, Any]) -> OrderDetail:
         item_info=_project_item_info(inner.get("itemInfo")),
         fare=_project_fare(inner.get("fare")),
         times=_project_times(inner.get("times")),
+        is_new_customer=extract_new_customer_flag(inner),
         mex_opt=_project_mex_opt(inner.get("mexOPT")),
     )
 

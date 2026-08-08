@@ -53,6 +53,15 @@ class FinancialMetricValue(BaseModel):
 
     display: str = Field(default="", description="Raw display string from Grab (locale-formatted).")
     value_minor: int = Field(default=0, description="Integer amount in minor currency units.")
+    name: str = Field(
+        default="",
+        description=(
+            "Grab's own label for this row, kept because several rows can "
+            "land in one bucket. A store's 'Khấu trừ' is both the platform "
+            "commission and the advertising fee; without this the UI could "
+            "only render them as an anonymous '#1' and '#2'."
+        ),
+    )
 
 
 class FinancialMetricGroup(BaseModel):

@@ -1,11 +1,32 @@
 "use client";
 
 import * as React from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { ListChecks, ShoppingBag } from "lucide-react";
+
 import { useMenu } from "@/lib/api/menu";
 import { MenuTree } from "@/components/menu/MenuTree";
 import { NewItemDialog } from "@/components/menu/NewItemDialog";
+import { ModifiersClient } from "@/app/(dashboard)/modifiers/modifiers-client";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ApiError } from "@/lib/api";
 import { toast } from "sonner";
+
+/**
+ * The two menu-management surfaces live under one page as tabs: the
+ * dishes/categories tree, and the modifier (add-on) groups plus their
+ * item links. They were two separate sidebar entries, which split one job
+ * — building the menu — across two places; a group only matters in
+ * relation to the items it attaches to, so managing both here keeps that
+ * relationship in view.
+ */
+
+type MenuTab = "items" | "addons";
+
+const TABS: ReadonlyArray<{ value: MenuTab; label: string; icon: typeof ShoppingBag }> = [
+  { value: "items", label: "Món & danh mục", icon: ShoppingBag },
+  { value: "addons", label: "Tùy chọn thêm", icon: ListChecks },
+];
 
 function parseCategories(menu?: Record<string, unknown>): { id: string; name: string }[] {
   if (!menu) return [];
@@ -28,7 +49,8 @@ function parseCategories(menu?: Record<string, unknown>): { id: string; name: st
   });
 }
 
-export function MenuClient() {
+/** Dishes + categories tree with the quick-action rail. */
+function ItemsTab() {
   const { data, isLoading, error } = useMenu();
 
   React.useEffect(() => {
@@ -60,9 +82,58 @@ export function MenuClient() {
             <li>• Kéo danh mục bằng núm để sắp xếp lại.</li>
             <li>• Nhấn + trên thẻ danh mục để nhanh chóng thêm món.</li>
             <li>• Tên tiếng Việt được tự động dịch khi lưu.</li>
+            <li>• Gán nhóm tùy chọn cho món ở tab &quot;Tùy chọn thêm&quot;.</li>
           </ul>
         </div>
       </div>
     </div>
+  );
+}
+
+export function MenuClient() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  // The tab lives in the URL so the old /modifiers route can redirect
+  // straight to the add-ons tab, and so a shared link reopens the same
+  // view. Anything other than a known tab falls back to items.
+  const paramTab = searchParams.get("tab");
+  const activeTab: MenuTab = paramTab === "addons" ? "addons" : "items";
+
+  const setTab = React.useCallback(
+    (next: string) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (next === "items") params.delete("tab");
+      else params.set("tab", next);
+      const query = params.toString();
+      // `replace`, not `push`: flipping tabs shouldn't stack Back-button
+      // history the way navigating to a different page would.
+      router.replace(query ? `/menu?${query}` : "/menu", { scroll: false });
+    },
+    [router, searchParams],
+  );
+
+  return (
+    <Tabs value={activeTab} onValueChange={setTab}>
+      <TabsList>
+        {TABS.map(({ value, label, icon: Icon }) => (
+          <TabsTrigger key={value} value={value}>
+            <Icon className="h-4 w-4" />
+            {label}
+          </TabsTrigger>
+        ))}
+      </TabsList>
+
+      <TabsContent value="items" className="mt-4">
+        <ItemsTab />
+      </TabsContent>
+      {/* keepMounted: base-ui unmounts an inactive panel by default, which
+          would throw away an open "liên kết món" dialog and its unsaved
+          selection if the URL's tab flips via browser Back/Forward. Kept
+          mounted, the add-ons subtree — and any open dialog — survives a
+          tab switch; the cost is one modifier-list fetch on page load. */}
+      <TabsContent value="addons" keepMounted className="mt-4">
+        <ModifiersClient />
+      </TabsContent>
+    </Tabs>
   );
 }

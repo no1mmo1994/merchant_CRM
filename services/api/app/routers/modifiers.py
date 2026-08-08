@@ -9,6 +9,13 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.grab_errors import (
+    PASSCODE_CODE,
+    PASSCODE_MESSAGE,
+    PASSCODE_SHORT,
+    PASSCODE_TARGET,
+    is_passcode_error,
+)
 from app.deps import get_grab_client, get_session, require_user
 from app.models import User
 from app.schemas import (
@@ -544,6 +551,23 @@ def _grab_write_error(exc: httpx.HTTPStatusError, *, what: str) -> HTTPException
     # only happened to work because "InvalidRange" contains "range".
     is_range_error = target == "InvalidRange" or "range" in grab_message.lower()
 
+    # Checked before anything endpoint-specific: this one is about the
+    # credential, so no amount of adjusting the group will get past it.
+    # Checked against `target`, which was parsed from the FULL response —
+    # not against `body`, which is truncated to 500 chars. If Grab ever
+    # pads this envelope past that, the truncated copy stops being valid
+    # JSON and the detection silently reverts to a generic message.
+    if status_code == 403 and target == PASSCODE_TARGET:
+        return HTTPException(
+            status_code=403,
+            detail={
+                "code": PASSCODE_CODE,
+                "message": PASSCODE_MESSAGE,
+                "grab_status": status_code,
+                "grab_target": target,
+            },
+        )
+
     if status_code == 409 and is_range_error:
         return HTTPException(
             status_code=409,
@@ -940,8 +964,13 @@ async def set_group_items(
                 # what the caller asked for either way.
                 unchanged.append(item_id)
                 continue
-            failed[item_id] = f"HTTP {exc.response.status_code}"
-            log.warning("link %s -> %s failed: %s", group_id, item_id, exc.response.status_code)
+            failed[item_id] = (
+                PASSCODE_SHORT
+                if is_passcode_error(exc.response.status_code, exc.response.text)
+                else f"HTTP {exc.response.status_code}"
+            )
+            log.warning("link %s -> %s failed: %s — %s", group_id, item_id,
+                        exc.response.status_code, (exc.response.text or "")[:200])
         except httpx.HTTPError as exc:
             failed[item_id] = "unreachable"
             log.warning("link %s -> %s transport error: %r", group_id, item_id, exc)
@@ -960,8 +989,13 @@ async def set_group_items(
             )
             unlinked.append(item_id)
         except httpx.HTTPStatusError as exc:
-            failed[item_id] = f"HTTP {exc.response.status_code}"
-            log.warning("unlink %s -> %s failed: %s", group_id, item_id, exc.response.status_code)
+            failed[item_id] = (
+                PASSCODE_SHORT
+                if is_passcode_error(exc.response.status_code, exc.response.text)
+                else f"HTTP {exc.response.status_code}"
+            )
+            log.warning("unlink %s -> %s failed: %s — %s", group_id, item_id,
+                        exc.response.status_code, (exc.response.text or "")[:200])
         except (httpx.HTTPError, ValueError) as exc:
             failed[item_id] = "unreachable" if isinstance(exc, httpx.HTTPError) else str(exc)
             log.warning("unlink %s -> %s failed: %r", group_id, item_id, exc)

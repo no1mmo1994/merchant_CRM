@@ -210,16 +210,31 @@ export function LinkItemsDialog({
       const changed = result.linked.length + result.unlinked.length;
       const failedCount = Object.keys(result.failed ?? {}).length;
 
+      // When every item failed for the same reason, that reason is the
+      // story — not the item ids. Grab refusing the whole write surface
+      // over a missing PIN listed as "VNITE…: HTTP 403" three times sent
+      // the operator hunting for a fault in items that are fine.
+      const reasons = new Set(Object.values(result.failed ?? {}));
+      const singleReason = reasons.size === 1 ? [...reasons][0] : null;
+
       if (failedCount > 0) {
         // Partial success is a normal outcome here — Grab is asked once
         // per item. Saying "done" would hide the items that didn't take.
+        //
+        // The reason has to appear whether or not some items got through:
+        // a run where 2 succeeded and 3 hit the PIN gate is the common
+        // shape, and it must not be the one case that never says "PIN".
         toast.warning(
-          `Đã cập nhật ${changed} món, ${failedCount} món không được`,
+          changed === 0
+            ? `Không cập nhật được món nào${singleReason ? ` — ${singleReason}` : ""}`
+            : `Đã cập nhật ${changed} món, ${failedCount} món không được`,
           {
-            description: Object.entries(result.failed)
-              .slice(0, 3)
-              .map(([id, why]) => `${id}: ${why}`)
-              .join(" · "),
+            description: singleReason
+              ? `${failedCount} món đều bị từ chối: ${singleReason}. Không phải do món hay nhóm bạn chọn.`
+              : Object.entries(result.failed)
+                  .slice(0, 3)
+                  .map(([id, why]) => `${id}: ${why}`)
+                  .join(" · "),
           },
         );
       } else if (!result.lock_acquired) {

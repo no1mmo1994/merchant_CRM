@@ -79,15 +79,42 @@ async def delete_category(client: GrabClient, category_id: str) -> dict | None:
     return None
 
 
-async def sort_categories(client: GrabClient, sorts: list[dict]) -> dict:
+async def sort_categories(
+    client: GrabClient,
+    sorts: list[dict],
+    *,
+    section_by_category: dict[str, str] | None = None,
+) -> dict:
     """PUT /food/merchant/categories-sort — reorder categories.
 
     `sorts` is a list of `{resourceID, sortOrder}` dicts, exactly as
     built by the original `get_sapxepdanhmuc.py`.
+
+    `section_by_category` maps category id → section id, from
+    `menu.category_section_map`. Categories are grouped into one
+    `sectionSorts` entry per section, because Grab reorders *within* a
+    section and a menu can have several.
+
+    Omitting it keeps the captured behaviour — a single group with
+    `sectionID: ""` — which is right for a flat menu and wrong for a menu
+    built from sections. Callers that can reach the menu should pass it;
+    the fallback exists so this stays usable without one.
     """
+    if section_by_category:
+        grouped: dict[str, list[dict]] = {}
+        for entry in sorts:
+            section_id = section_by_category.get(str(entry.get("resourceID") or ""), "")
+            grouped.setdefault(section_id, []).append(entry)
+        section_sorts = [
+            {"sectionID": section_id, "sorts": entries}
+            for section_id, entries in grouped.items()
+        ]
+    else:
+        section_sorts = [{"sectionID": "", "sorts": sorts}]
+
     res = await client.put(
         "/food/merchant/categories-sort",
-        json={"sectionSorts": [{"sectionID": "", "sorts": sorts}]},
+        json={"sectionSorts": section_sorts},
     )
     res.raise_for_status()
     if res.content:

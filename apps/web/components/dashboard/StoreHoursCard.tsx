@@ -28,7 +28,7 @@ const DAY_LABELS_VI = [
   "Thứ Tư",
   "Thứ Năm",
   "Thứ Sáu",
-  "Thứ Bảt",
+  "Thứ Bảy",
   "Chủ Nhật",
 ] as const;
 
